@@ -6,18 +6,17 @@ from datetime import datetime
 from io import BytesIO
 from fpdf import FPDF
 
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # CONFIG
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 st.set_page_config(page_title="IHOP OE One Pager", layout="wide")
 
 LOGO_PATH = "ihop_logo.png"
 EXCEL_FILE = "OE_Opportunities_Classification.xlsx"
 
-
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # UTILITIES
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 @st.cache_data
 def load_classifications(file_path: str) -> pd.DataFrame:
     """Load or create the Excel classification DB."""
@@ -39,16 +38,22 @@ def save_classifications(df: pd.DataFrame, file_path: str):
 def extract_opportunities(raw_text: str):
     """
     Extract opportunity lines, ignoring headers, short lines, and labels.
-    Cleans up bullets and dashes.
+    Cleans up bullets, dashes, and section titles like 'FOH:' or 'BOH:'.
     """
     lines = [line.strip() for line in raw_text.split("\n") if line.strip()]
     opportunities = []
 
     for line in lines:
         # Clean up smart punctuation and bullets
-        line = line.replace("–", "-").replace("—", "-").replace("•", "").replace("●", "").strip()
+        line = (
+            line.replace("–", "-")
+            .replace("—", "-")
+            .replace("•", "")
+            .replace("●", "")
+            .strip()
+        )
 
-        # --- Exclusion rules ---
+        # Exclude headers, section labels, and short lines
         if line.endswith(":"):
             continue
         if re.match(r"^[A-Z\s]+:$", line):
@@ -81,28 +86,52 @@ def sanitize_text(text: str) -> str:
     text = text.replace("“", '"').replace("”", '"')
     text = text.replace("‘", "'").replace("’", "'")
     text = re.sub(r"[•·●▪]", "-", text)
+    text = text.replace("\t", " ").replace("\r", " ").replace("\n", " ")
+    text = re.sub(r"\s{2,}", " ", text)
     text = re.sub(r"[^\x00-\x7F]+", "", text)
     return text.strip()
 
 
+# ----------------------------------------------------------------------
+# PDF GENERATION
+# ----------------------------------------------------------------------
 def generate_pdf(store_num: str, oe_cycle: str, df: pd.DataFrame) -> BytesIO:
     """Generate PDF with FOH/BOH sections using built-in Helvetica font."""
     pdf = FPDF()
     pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
 
     # Header
-    pdf.set_font("Helvetica", "B", 16)
     if os.path.exists(LOGO_PATH):
         pdf.image(LOGO_PATH, x=10, y=8, w=30)
+    pdf.set_font("Helvetica", "B", 16)
     pdf.cell(200, 10, "IHOP OE One Pager", new_x="LMARGIN", new_y="NEXT", align="C")
 
     pdf.set_font("Helvetica", "", 12)
-    pdf.cell(200, 10, f"Store #{store_num} | OE Cycle: {oe_cycle}", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.cell(
+        200,
+        10,
+        f"Store #{store_num} | OE Cycle: {oe_cycle}",
+        new_x="LMARGIN",
+        new_y="NEXT",
+        align="C",
+    )
     pdf.ln(10)
 
-    # Split sections
     foh_items = df[df["Classification"].isin(["FOH", "BOTH"])]
     boh_items = df[df["Classification"].isin(["BOH", "BOTH"])]
+
+    def safe_multicell(pdf, text):
+        """Multi-cell wrapper that prevents FPDF line width exceptions."""
+        text = sanitize_text(text)
+        text = re.sub(r"[\t\r\n]+", " ", text)
+        text = re.sub(r"\s{2,}", " ", text).strip()
+        if len(text) > 220:
+            text = text[:220] + "..."
+        try:
+            pdf.multi_cell(0, 6, f"- {text}")
+        except Exception:
+            pdf.multi_cell(0, 6, "- [Error displaying line]")
 
     def section(title, items):
         pdf.set_font("Helvetica", "B", 12)
@@ -112,11 +141,9 @@ def generate_pdf(store_num: str, oe_cycle: str, df: pd.DataFrame) -> BytesIO:
             pdf.multi_cell(0, 6, "— None —")
         else:
             for _, row in items.iterrows():
-                opp = sanitize_text(row["Opportunity"])
-                pdf.multi_cell(0, 6, f"- {opp}")
-        pdf.ln(4)
+                safe_multicell(pdf, row["Opportunity"])
+        pdf.ln(5)
 
-    # Add sections
     section("FRONT OF HOUSE (FOH)", foh_items)
     section("BACK OF HOUSE (BOH)", boh_items)
 
@@ -130,9 +157,9 @@ def generate_pdf(store_num: str, oe_cycle: str, df: pd.DataFrame) -> BytesIO:
     return buffer
 
 
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # STREAMLIT UI
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 if os.path.exists(LOGO_PATH):
     st.image(LOGO_PATH, width=120)
 st.title("🥞 IHOP OE One Pager")
@@ -148,16 +175,15 @@ if user_input.strip():
     st.write(f"✅ Found **{len(opportunities)}** valid opportunities.")
 
     if opportunities:
-        # Sync with DB
         classification_db = sync_new_opportunities(classification_db, opportunities)
-
         st.divider()
         st.markdown("### 🏷️ Review & Confirm Classifications")
 
         updated_rows = []
         for opp in opportunities:
             current_value = classification_db.loc[
-                classification_db["Opportunity"].str.lower() == opp.lower(), "Classification"
+                classification_db["Opportunity"].str.lower() == opp.lower(),
+                "Classification",
             ].values
             preselect = current_value[0] if len(current_value) > 0 and current_value[0] else "FOH"
 
@@ -174,7 +200,6 @@ if user_input.strip():
         st.divider()
 
         if st.button("💾 Save & Generate PDF One Pager"):
-            # Update DB (learning system)
             for opp, selected in updated_rows:
                 mask = classification_db["Opportunity"].str.lower() == opp.lower()
                 if mask.any():
@@ -183,7 +208,6 @@ if user_input.strip():
                     classification_db.loc[len(classification_db)] = [opp, selected]
             save_classifications(classification_db, EXCEL_FILE)
 
-            # Create session-specific DataFrame
             session_df = pd.DataFrame(updated_rows, columns=["Opportunity", "Classification"])
             pdf_data = generate_pdf(store_num, oe_cycle, session_df)
 
