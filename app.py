@@ -76,7 +76,6 @@ def save_classifications_replace_all(updates_df):
     try:
         ws = open_ws()
 
-        # Normalize both sides
         updates_df["Opportunity"] = updates_df["Opportunity"].apply(normalize_text)
         updates_df["Classification"] = updates_df["Classification"].astype(str).str.strip()
 
@@ -84,14 +83,12 @@ def save_classifications_replace_all(updates_df):
         existing_df["Opportunity"] = existing_df["Opportunity"].apply(normalize_text)
         existing_df["Classification"] = existing_df["Classification"].astype(str).str.strip()
 
-        # Combine + deduplicate
         merged = (
             pd.concat([existing_df, updates_df], ignore_index=True)
             .drop_duplicates(subset=["Opportunity"], keep="last")
             .reset_index(drop=True)
         )
 
-        # Rewrite full sheet (header + data)
         all_rows = [["Opportunity", "Classification"]] + merged.values.tolist()
         ws.batch_clear(["A1:B1000"])
         time.sleep(0.5)
@@ -129,50 +126,81 @@ def extract_opportunities(raw_text):
     return opps
 
 # ---------------------------------------------------------------------------
-# PDF GENERATION
+# PDF GENERATION (ARIAL, POLISHED)
 # ---------------------------------------------------------------------------
 def generate_pdf(store_num, oe_cycle, df):
-    pdf = FPDF()
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
 
-    content_width = pdf.w - pdf.l_margin - pdf.r_margin
-    bullet_w, text_w = 4, content_width - 4
+    margin_left = 15
+    margin_right = 15
+    content_width = 210 - margin_left - margin_right
+    line_spacing = 6
 
+    # --- Header ---
     if os.path.exists(LOGO_PATH):
         pdf.image(LOGO_PATH, x=10, y=8, w=30)
-    pdf.set_font("Helvetica", "B", 16)
-    pdf.cell(0, 10, "IHOP OE One Pager", new_x="LMARGIN", new_y="NEXT", align="C")
-    pdf.set_font("Helvetica", "", 12)
-    pdf.cell(0, 10, f"Store #{store_num} | OE Cycle: {oe_cycle}", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.set_font("Arial", "B", 18)
+    pdf.cell(0, 10, "IHOP OE One Pager", align="C", ln=True)
+    pdf.set_font("Arial", "", 12)
+    pdf.cell(0, 8, f"Store #{store_num}  |  OE Cycle: {oe_cycle}", align="C", ln=True)
     pdf.ln(6)
+    pdf.set_draw_color(0, 102, 204)
+    pdf.set_line_width(0.8)
+    pdf.line(margin_left, pdf.get_y(), 210 - margin_right, pdf.get_y())
+    pdf.ln(8)
 
-    def bullet_line(t):
-        t = normalize_text(t) or "[Empty]"
-        pdf.set_font("Helvetica", "", 10)
-        pdf.cell(bullet_w, 6, "- ", new_x=XPos.RIGHT, new_y=YPos.TOP)
-        pdf.multi_cell(text_w, 6, t)
-
-    def section(title, subset):
-        pdf.set_font("Helvetica", "B", 12)
-        pdf.cell(0, 8, title, new_x="LMARGIN", new_y="NEXT")
-        pdf.set_font("Helvetica", "", 10)
-        if subset.empty:
-            pdf.cell(bullet_w, 6, "- ", new_x=XPos.RIGHT, new_y=YPos.TOP)
-            pdf.multi_cell(text_w, 6, "None")
-        else:
-            for _, row in subset.iterrows():
-                bullet_line(row["Opportunity"])
+    # --- Section helper functions ---
+    def section_header(title, color=(0, 102, 204)):
+        pdf.set_font("Arial", "B", 13)
+        pdf.set_text_color(*color)
+        pdf.cell(0, 8, title, ln=True)
+        pdf.set_draw_color(200, 200, 200)
+        pdf.set_line_width(0.3)
+        pdf.line(margin_left, pdf.get_y(), 210 - margin_right, pdf.get_y())
         pdf.ln(4)
 
+    def bullet_item(text):
+        pdf.set_font("Arial", "", 11)
+        pdf.set_text_color(0, 0, 0)
+        text = normalize_text(text) or "[Empty]"
+        pdf.multi_cell(content_width, line_spacing, f"• {text}")
+        pdf.ln(1)
+
+    def section(title, subset):
+        section_header(title)
+        if subset.empty:
+            pdf.set_font("Arial", "I", 11)
+            pdf.set_text_color(120, 120, 120)
+            pdf.cell(0, line_spacing, "- None -", ln=True)
+            pdf.ln(2)
+        else:
+            for _, row in subset.iterrows():
+                bullet_item(row["Opportunity"])
+            pdf.ln(4)
+
+    # --- Data Split ---
     foh = df[df["Classification"].isin(["FOH", "BOTH"])]
     boh = df[df["Classification"].isin(["BOH", "BOTH"])]
 
+    # --- Summary Box ---
+    total_foh = len(foh)
+    total_boh = len(boh)
+    pdf.set_font("Arial", "B", 11)
+    pdf.set_text_color(0, 0, 0)
+    pdf.cell(0, 8, f"Summary: {total_foh} FOH items | {total_boh} BOH items", ln=True)
+    pdf.ln(4)
+
+    # --- Sections ---
     section("FRONT OF HOUSE (FOH)", foh)
     section("BACK OF HOUSE (BOH)", boh)
 
-    pdf.set_font("Helvetica", "I", 9)
-    pdf.cell(0, 8, f"Generated {datetime.now():%Y-%m-%d %H:%M}", align="R")
+    # --- Footer ---
+    pdf.set_y(-20)
+    pdf.set_font("Arial", "I", 9)
+    pdf.set_text_color(100, 100, 100)
+    pdf.cell(0, 8, f"Generated {datetime.now():%Y-%m-%d %H:%M} | IHOP Confidential", align="C")
 
     out = BytesIO()
     pdf.output(out)
