@@ -27,14 +27,17 @@ text_input = st.text_area(
     placeholder="Paste text here. Each opportunity should be on its own line."
 )
 
+# ---------- ADD NEW LINES IF PROVIDED ----------
 if text_input:
     new_lines = [line.strip() for line in text_input.split("\n") if line.strip() and ":" not in line]
     for line in new_lines:
         if line not in df["Opportunity"].values:
             df.loc[len(df)] = [line, ""]
 
-# ---------- CLASSIFICATION ----------
-if not df.empty:
+# ---------- CONTROL DISPLAY ----------
+if df.empty and not text_input:
+    st.info("Paste opportunities above to begin classification.")
+else:
     st.subheader("Please Verify Each Opportunity (FOH / BOH / BOTH)")
 
     for i, row in df.iterrows():
@@ -52,15 +55,13 @@ if not df.empty:
             )
 
     if st.button("💾 Update Database"):
-        os.makedirs(os.path.dirname(excel_path), exist_ok=True)
         df.to_excel(excel_path, index=False)
-        st.success("Database updated and saved successfully to OE_Opportunities_Classification.xlsx.")
+        st.success("✅ Database updated successfully!")
 
     st.markdown("---")
 
-    # ---------- GROUP AND PREVIEW ----------
+    # ---------- GROUP + DISPLAY ----------
     grouped = df.groupby("Classification")["Opportunity"].apply(list).to_dict()
-
     st.subheader("✅ Verified Opportunities Summary")
     for section in ["FOH", "BOH", "BOTH"]:
         if section in grouped:
@@ -83,7 +84,6 @@ if not df.empty:
             pdf.set_auto_page_break(auto=True, margin=15)
 
             def safe_text(s):
-                """Handle Unicode safely for FPDF."""
                 return s.encode("latin-1", "replace").decode("latin-1")
 
             pdf.set_font("Helvetica", "B", 16)
@@ -112,6 +112,3 @@ if not df.empty:
                     file_name=f"IHOP_OE_{store_number}.pdf",
                     mime="application/pdf"
                 )
-
-else:
-    st.info("Paste opportunities above to begin classification.")
