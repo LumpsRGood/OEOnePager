@@ -110,17 +110,21 @@ def force_overwrite(ws, merged):
 # SAVE / MERGE
 # -----------------------------------------------------------------------------
 def save_classifications_merge(updates_df):
-    """Strict merge — preserves user text and forces overwrite."""
+    """Merge that tolerates trailing punctuation/plurals but keeps original text."""
     try:
         ws = open_ws()
         existing_df = df_from_ws(ws)
 
+        def merge_key(s):
+            s = normalize_text(s)
+            s = re.sub(r"[^\w\s]", "", s)      # drop punctuation
+            s = re.sub(r"\bs\b", "", s)        # singularize simple plurals
+            return s.strip().lower()
+
         for df in (existing_df, updates_df):
             df["Opportunity"] = df["Opportunity"].apply(normalize_text)
             df["Classification"] = df["Classification"].astype(str).str.strip()
-
-        existing_df["__key"] = existing_df["Opportunity"].str.lower()
-        updates_df["__key"] = updates_df["Opportunity"].str.lower()
+            df["__key"] = df["Opportunity"].apply(merge_key)
 
         merged = (
             pd.concat([existing_df, updates_df], ignore_index=True)
@@ -143,7 +147,7 @@ def save_classifications_merge(updates_df):
 
         bdp_rows = merged[merged["Opportunity"].str.contains("BDP", case=False)]
         if not bdp_rows.empty:
-            st.write("🧩 Debug – BDP entries written:")
+            st.write("🧩 Debug – BDP entries written after soft merge:")
             st.dataframe(bdp_rows)
 
         return merged
@@ -151,7 +155,6 @@ def save_classifications_merge(updates_df):
     except Exception as e:
         st.error(f"💥 Save error: {e}")
         return None
-
 # -----------------------------------------------------------------------------
 # UTILITIES
 # -----------------------------------------------------------------------------
