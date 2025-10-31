@@ -203,14 +203,25 @@ classification_db = df_from_ws(ws_test)
 if user_input.strip():
     opportunities = extract_opportunities(user_input)
     st.write(f"✅ Found **{len(opportunities)}** opportunities.")
+
     if opportunities:
         st.divider()
         st.markdown("### 🏷️ Review & Confirm Classifications")
 
+        normalized_existing = classification_db["Opportunity"].apply(normalize_text).str.lower().tolist()
         updated_rows = []
+        new_items = []
+
+        new_count = sum(1 for opp in opportunities if normalize_text(opp).lower() not in normalized_existing)
+        if new_count:
+            st.info(f"🆕 {new_count} new opportunities detected — please review carefully.")
+
         for opp in opportunities:
+            norm_opp = normalize_text(opp).lower()
+            is_new = norm_opp not in normalized_existing
+
             existing_match = classification_db.loc[
-                classification_db["Opportunity"].apply(normalize_text).str.lower() == normalize_text(opp).lower(),
+                classification_db["Opportunity"].apply(normalize_text).str.lower() == norm_opp,
                 "Classification",
             ]
             preselect = (
@@ -219,16 +230,25 @@ if user_input.strip():
                 else "FOH"
             )
 
+            display_label = f"**{opp}**"
+            if is_new:
+                display_label = f"🆕 **{opp}**"
+
             selected = st.radio(
-                f"**{opp}**",
+                display_label,
                 CLASS_CHOICES,
                 horizontal=True,
                 key=opp,
                 index=CLASS_CHOICES.index(preselect),
             )
-            updated_rows.append((opp, selected))
 
-        st.warning("⚠️ Review classifications before generating PDF.")
+            updated_rows.append((opp, selected))
+            if is_new:
+                new_items.append(opp)
+
+        if new_items:
+            st.warning("⚠️ New opportunities marked with 🆕 — confirm classifications before saving.")
+
         st.divider()
 
         if st.button("💾 Save & Generate PDF One Pager"):
