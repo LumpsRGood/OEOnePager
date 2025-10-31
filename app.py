@@ -1,183 +1,117 @@
 import streamlit as st
 import pandas as pd
-import io
-from reportlab.lib.pagesizes import letter
-from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib import colors
-import base64
 import os
+import re
 
-st.set_page_config(page_title="IHOP OE One Pager", layout="centered")
+st.set_page_config(page_title="IHOP OE One Pager", layout="wide")
 
-# --- FILE CONSTANTS ---
-DB_PATH = "OE_Opportunities_Classification.xlsx"
-LOGO_URL = "https://raw.githubusercontent.com/LumpsRGood/OEOnePager/main/ihop_logo.png"
+st.title("🥞 IHOP OE One Pager")
 
-# --- FUNCTIONS ---
+EXCEL_FILE = "OE_Opportunities_Classification.xlsx"
+
+
+# --- Utility functions ---
 
 @st.cache_data
 def load_classifications(file_path: str):
-    """Load classification reference or create blank."""
-    try:
+    """Load the Excel file or return a default DataFrame if missing."""
+    if os.path.exists(file_path):
         df = pd.read_excel(file_path)
-        df.columns = [c.strip().lower() for c in df.columns]
-        if "opportunity" not in df.columns or "classification" not in df.columns:
-            raise ValueError
+        df["Opportunity"] = df["Opportunity"].astype(str)
+        df["Classification"] = df["Classification"].astype(str)
         return df
-    except Exception:
-        return pd.DataFrame(columns=["opportunity", "classification"])
+    else:
+        st.warning("⚠️ Classification file not found. Creating a new one in memory.")
+        df = pd.DataFrame(columns=["Opportunity", "Classification"])
+        return df
 
-def save_classifications(df, path=DB_PATH):
-    """Save updated classification database."""
-    df_sorted = df.sort_values("opportunity", key=lambda s: s.str.lower()).reset_index(drop=True)
-    df_sorted.to_excel(path, index=False)
 
-def filter_opportunities(text):
-    """Split text into clean opportunity lines, skipping section headers."""
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-    opps = []
-    for l in lines:
-        if ":" in l and len(l.split()) <= 4:  # skip headers like 'Food Safety:'
+def save_classifications(df: pd.DataFrame, file_path: str):
+    """Save updates to Excel file."""
+    df.to_excel(file_path, index=False)
+    st.success(f"✅ Classifications saved to {file_path}")
+
+
+def extract_opportunities(raw_text: str):
+    """
+    Extract potential 'opportunity' lines.
+    Ignore section headers or lines that end with ':' or are very short.
+    """
+    lines = [line.strip() for line in raw_text.split("\n") if line.strip()]
+    opportunities = []
+    for line in lines:
+        # Skip section headers and nonsense lines
+        if line.endswith(":"):
             continue
-        if len(l) < 5:
+        if len(line.split()) < 3:
             continue
-        opps.append(l)
-    return opps
+        if re.match(r"^[A-Z\s]+:$", line):  # all caps header
+            continue
+        opportunities.append(line)
+    return opportunities
 
-def auto_classify(opp, db):
-    """Return saved classification if found in DB."""
-    if db.empty:
-        return None
-    match = db[db["opportunity"].str.lower().str.strip() == opp.lower().strip()]
-    if not match.empty:
-        return match.iloc[0]["classification"]
-    return None
 
-def generate_pdf(store_num, cycle, data, logo_path):
-    """Builds PDF and returns it as BytesIO."""
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter)
-    elements = []
-    styles = getSampleStyleSheet()
-    style_normal = styles["Normal"]
-    style_heading = styles["Heading1"]
+def sync_classifications(class_db, new_opps):
+    """Add new opportunities to classification DB if not already present."""
+    existing = set(class_db["Opportunity"].str.lower())
+    missing = [o for o in new_opps if o.lower() not in existing]
+    if missing:
+        st.info(f"🆕 Added {len(missing)} new opportunities to the database.")
+        new_df = pd.DataFrame({"Opportunity": missing, "Classification": [""] * len(missing)})
+        class_db = pd.concat([class_db, new_df], ignore_index=True)
+    return class_db
 
-    # Header with logo
-    if logo_path:
-        try:
-            logo = Image(logo_path, width=1.5*inch, height=1.5*inch)
-            elements.append(logo)
-        except Exception:
-            pass
 
-    elements.append(Paragraph(f"IHOP OE One Pager", style_heading))
-    elements.append(Paragraph(f"Store #{store_num} | {cycle}", style_normal))
-    elements.append(Spacer(1, 0.25 * inch))
+# --- Load or create classification DB ---
+classification_db = load_classifications(EXCEL_FILE)
 
-    # Table of opportunities
-    data_table = [["Opportunity", "Classification"]] + data
-    table = Table(data_table, colWidths=[4.5 * inch, 1.5 * inch])
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.lightblue),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("ALIGN", (0, 0), (-1, -1), "LEFT"),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
-        ("BACKGROUND", (0, 1), (-1, -1), colors.whitesmoke),
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-    ]))
-    elements.append(table)
+st.markdown("### 🧾 Paste OE Notes or Opportunities Below")
+user_input = st.text_area("Paste text here:", height=300, placeholder="Paste your OE notes...")
 
-    doc.build(elements)
-    buffer.seek(0)
-    return buffer
+if user_input:
+    opportunities = extract_opportunities(user_input)
+    st.write(f"✅ Found **{len(opportunities)}** possible opportunities.")
 
-# --- UI ---
+    if opportunities:
+        # Merge new items into DB if needed
+        classification_db = sync_classifications(classification_db, opportunities)
 
-st.title("IHOP OE One Pager")
+        st.divider()
+        st.markdown("### 🏷️ Classify Each Opportunity (FOH / BOH / BOTH)")
 
-st.markdown("Paste your opportunities below or upload a text/Excel file.")
+        updated_rows = []
+        for opp in opportunities:
+            current_value = classification_db.loc[
+                classification_db["Opportunity"].str.lower() == opp.lower(), "Classification"
+            ].values
+            preselect = current_value[0] if len(current_value) > 0 and current_value[0] else None
 
-uploaded_file = st.file_uploader("Upload Opportunities File", type=["txt", "xlsx"])
-input_text = st.text_area("Or paste opportunities here:")
+            selected = st.radio(
+                f"**{opp}**",
+                ["FOH", "BOH", "BOTH"],
+                horizontal=True,
+                index=["FOH", "BOH", "BOTH"].index(preselect) if preselect in ["FOH", "BOH", "BOTH"] else 0,
+                key=opp,
+            )
 
-# Load database
-classification_db = load_classifications(DB_PATH)
+            updated_rows.append((opp, selected))
 
-opportunities = []
+        st.divider()
 
-if uploaded_file:
-    if uploaded_file.name.endswith(".txt"):
-        text = uploaded_file.read().decode("utf-8")
-        opportunities = filter_opportunities(text)
-    elif uploaded_file.name.endswith(".xlsx"):
-        df = pd.read_excel(uploaded_file)
-        col = df.columns[0]
-        opportunities = filter_opportunities("\n".join(df[col].astype(str)))
-elif input_text:
-    opportunities = filter_opportunities(input_text)
+        if st.button("💾 Save Updates"):
+            for opp, selected in updated_rows:
+                mask = classification_db["Opportunity"].str.lower() == opp.lower()
+                if mask.any():
+                    classification_db.loc[mask, "Classification"] = selected
+                else:
+                    classification_db.loc[len(classification_db)] = [opp, selected]
+            save_classifications(classification_db, EXCEL_FILE)
 
-# --- Classification Section ---
-if opportunities:
-    st.subheader("Classify Opportunities")
+    else:
+        st.warning("No valid opportunity lines found.")
 
-    use_auto = st.toggle("Auto-classify from existing database", value=True)
 
-    classifications = []
-    for opp in opportunities:
-        preset = auto_classify(opp, classification_db) if use_auto else None
-        classification = st.selectbox(
-            f"Classify this opportunity:\n> {opp}",
-            ["FOH", "BOH", "BOTH"],
-            index=["FOH", "BOH", "BOTH"].index(preset) if preset in ["FOH", "BOH", "BOTH"] else 0,
-            key=opp
-        )
-        classifications.append((opp, classification))
-
-    df_display = pd.DataFrame(classifications, columns=["Opportunity", "Classification"])
-    st.dataframe(df_display, use_container_width=True)
-
-    store_num = st.text_input("Store Number:")
-    cycle = st.text_input("OE Cycle:")
-
-    if st.button("Generate One Pager"):
-        pdf = generate_pdf(store_num, cycle, classifications, LOGO_URL)
-
-        # Update and save database
-        updated_db = classification_db.copy()
-
-        for opp, cls in classifications:
-            match_idx = updated_db[
-                updated_db["opportunity"].str.lower().str.strip() == opp.lower().strip()
-            ].index
-            if not match_idx.empty:
-                # Update classification if changed
-                if updated_db.loc[match_idx[0], "classification"] != cls:
-                    updated_db.loc[match_idx[0], "classification"] = cls
-            else:
-                # Add new opportunity
-                updated_db = pd.concat(
-                    [updated_db, pd.DataFrame([[opp, cls]], columns=["opportunity", "classification"])],
-                    ignore_index=True
-                )
-
-        save_classifications(updated_db)
-        st.success("✅ PDF generated and classification database updated successfully!")
-
-        # PDF Preview
-        b64_pdf = base64.b64encode(pdf.getvalue()).decode("utf-8")
-        st.markdown(
-            f'<iframe src="data:application/pdf;base64,{b64_pdf}" width="700" height="1000" type="application/pdf"></iframe>',
-            unsafe_allow_html=True,
-        )
-
-        st.download_button(
-            label="Download One Pager PDF",
-            data=pdf,
-            file_name=f"IHOP_OE_OnePager_{store_num}.pdf",
-            mime="application/pdf",
-        )
-else:
-    st.info("Paste or upload opportunities above to start classifying.")
+# --- Show current database ---
+st.divider()
+st.markdown("### 📊 Current Classification Database")
+st.dataframe(classification_db, width="stretch")
