@@ -1,114 +1,88 @@
 import streamlit as st
 import pandas as pd
-from fpdf import FPDF
 import os
+from fpdf import FPDF
+import io
 
-# ---------- PAGE CONFIG ----------
-st.set_page_config(page_title="IHOP OE One Pager", layout="centered")
-st.title("🥞 IHOP OE One Pager")
-st.markdown("---")
+st.set_page_config(page_title="IHOP OE One Pager", layout="wide")
 
-# ---------- FILE PATH ----------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-excel_path = os.path.join(BASE_DIR, "OE_Opportunities_Classification.xlsx")
+FILE_PATH = "OE_Opportunities_Classification.xlsx"
 
-# ---------- LOAD EXISTING DATA ----------
-if os.path.exists(excel_path):
-    df = pd.read_excel(excel_path)
-    st.success("Loaded existing OE_Opportunities_Classification.xlsx file.")
+# Initialize or load data
+if os.path.exists(FILE_PATH):
+    df = pd.read_excel(FILE_PATH)
 else:
     df = pd.DataFrame(columns=["Opportunity", "Classification"])
-    st.warning("No existing classification file found — a new one will be created after saving.")
 
-# ---------- TEXT INPUT ----------
-text_input = st.text_area(
-    "Paste text here (one line per row)",
-    height=150,
-    placeholder="Paste text here. Each opportunity should be on its own line."
+st.title("🥞 IHOP OE One Pager")
+
+st.markdown("### Paste text here *(one line per row)*")
+user_input = st.text_area(
+    "",
+    placeholder="Paste text here (one line per row)",
+    height=150
 )
 
-# ---------- ADD NEW LINES IF PROVIDED ----------
-if text_input:
-    new_lines = [line.strip() for line in text_input.split("\n") if line.strip() and ":" not in line]
-    for line in new_lines:
-        if line not in df["Opportunity"].values:
-            df.loc[len(df)] = [line, ""]
+# Handle pasted text
+if user_input.strip():
+    new_items = [line.strip() for line in user_input.split("\n") if line.strip()]
+    new_df = pd.DataFrame(new_items, columns=["Opportunity"])
+    df = pd.concat([df, new_df], ignore_index=True).drop_duplicates(subset=["Opportunity"])
 
-# ---------- CONTROL DISPLAY ----------
-if df.empty and not text_input:
-    st.info("Paste opportunities above to begin classification.")
+# Interface for verification/classification
+st.markdown("## Please Verify Each Opportunity (FOH / BOH / BOTH)")
+
+updated_rows = []
+for i, row in df.iterrows():
+    if pd.isna(row["Classification"]) or row["Classification"] == "":
+        st.markdown(f"⚠️ **{row['Opportunity']}**")
+    else:
+        st.markdown(f"**{row['Opportunity']}**")
+
+    classification = st.radio(
+        f"Select category for: {row['Opportunity']}",
+        ["", "FOH", "BOH", "BOTH"],
+        index=["", "FOH", "BOH", "BOTH"].index(row["Classification"]) if row["Classification"] in ["FOH", "BOH", "BOTH"] else 0,
+        key=f"class_{i}",
+        horizontal=True
+    )
+    updated_rows.append({"Opportunity": row["Opportunity"], "Classification": classification})
+
+# Save updates
+df = pd.DataFrame(updated_rows)
+df.to_excel(FILE_PATH, index=False)
+st.success(f"✅ Classifications saved to {FILE_PATH}")
+
+# Status banner
+unclassified = df["Classification"].isna().sum() + (df["Classification"] == "").sum()
+if unclassified > 0:
+    st.warning(f"⚠ {unclassified} opportunities still need classification.")
 else:
-    st.subheader("Please Verify Each Opportunity (FOH / BOH / BOTH)")
+    st.success("✅ All opportunities have been verified and classified!")
 
-    for i, row in df.iterrows():
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.text(row["Opportunity"])
-        with col2:
-            df.at[i, "Classification"] = st.radio(
-                "Select",
-                ["FOH", "BOH", "BOTH"],
-                horizontal=True,
-                key=f"class_{i}",
-                index=["FOH", "BOH", "BOTH"].index(row["Classification"])
-                if row["Classification"] in ["FOH", "BOH", "BOTH"] else 0
-            )
+# PDF download generation
+def generate_pdf(dataframe):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(200, 10, txt="IHOP OE One Pager", ln=True, align="C")
+    pdf.ln(10)
 
-    if st.button("💾 Update Database"):
-        df.to_excel(excel_path, index=False)
-        st.success("✅ Database updated successfully!")
+    pdf.set_font("Arial", size=12)
+    for _, row in dataframe.iterrows():
+        opp = row["Opportunity"]
+        cat = row["Classification"] if row["Classification"] else "UNCLASSIFIED"
+        pdf.multi_cell(0, 10, f"- {opp} ({cat})")
 
-    st.markdown("---")
+    buffer = io.BytesIO()
+    pdf.output(buffer)
+    return buffer.getvalue()
 
-    # ---------- GROUP + DISPLAY ----------
-    grouped = df.groupby("Classification")["Opportunity"].apply(list).to_dict()
-    st.subheader("✅ Verified Opportunities Summary")
-    for section in ["FOH", "BOH", "BOTH"]:
-        if section in grouped:
-            st.write(f"**{section} ({len(grouped[section])})**")
-            for item in grouped[section]:
-                st.markdown(f"- {item}")
-            st.markdown("")
+pdf_bytes = generate_pdf(df)
 
-    # ---------- PDF GENERATION ----------
-    st.subheader("📄 Generate One Pager PDF")
-    store_number = st.text_input("Enter Store Number:")
-    oe_cycle = st.text_input("Enter OE Cycle (e.g., 'Cycle 2, 2025')")
-
-    if st.button("Generate One Pager PDF"):
-        if not store_number or not oe_cycle:
-            st.error("Please enter both Store Number and OE Cycle before generating the PDF.")
-        else:
-            pdf = FPDF()
-            pdf.add_page()
-            pdf.set_auto_page_break(auto=True, margin=15)
-
-            def safe_text(s):
-                return s.encode("latin-1", "replace").decode("latin-1")
-
-            pdf.set_font("Helvetica", "B", 16)
-            pdf.cell(0, 10, safe_text("IHOP OE One Pager"), ln=True, align="C")
-
-            pdf.set_font("Helvetica", "", 12)
-            pdf.cell(0, 10, safe_text(f"Store: {store_number} | {oe_cycle}"), ln=True, align="C")
-            pdf.ln(10)
-
-            for section in ["FOH", "BOH", "BOTH"]:
-                if section in grouped and len(grouped[section]) > 0:
-                    pdf.set_font("Helvetica", "B", 14)
-                    pdf.cell(0, 10, safe_text(section), ln=True)
-                    pdf.set_font("Helvetica", "", 12)
-                    for item in grouped[section]:
-                        pdf.multi_cell(0, 8, safe_text(f"• {item}"))
-                    pdf.ln(5)
-
-            output_path = os.path.join(BASE_DIR, f"IHOP_OE_OnePager_{store_number}.pdf")
-            pdf.output(output_path)
-
-            with open(output_path, "rb") as f:
-                st.download_button(
-                    label="⬇️ Download One Pager PDF",
-                    data=f,
-                    file_name=f"IHOP_OE_{store_number}.pdf",
-                    mime="application/pdf"
-                )
+st.download_button(
+    label="📄 Download One-Pager PDF",
+    data=pdf_bytes,
+    file_name="OE_OnePager.pdf",
+    mime="application/pdf"
+)
