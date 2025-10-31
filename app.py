@@ -1,5 +1,6 @@
 import os
 import re
+import unicodedata
 import pandas as pd
 import streamlit as st
 from datetime import datetime
@@ -14,8 +15,10 @@ from oauth2client.service_account import ServiceAccountCredentials
 # CONFIG
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="IHOP OE One Pager", layout="wide")
+
 LOGO_PATH = "ihop_logo.png"
 SHEET_NAME = "OE_Opportunities_Classification"
+
 
 # -----------------------------------------------------------------------------
 # GOOGLE SHEETS CONNECTION
@@ -28,8 +31,7 @@ def get_gsheet_client():
         "https://www.googleapis.com/auth/drive",
     ]
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_info, scope)
-    client = gspread.authorize(creds)
-    return client
+    return gspread.authorize(creds)
 
 
 def load_classifications():
@@ -43,20 +45,41 @@ def load_classifications():
         data = data.fillna("")
         return data
     except Exception as e:
-        st.error(f"Error loading data from Google Sheet: {e}")
+        st.error(f"❌ Error loading data from Google Sheet: {e}")
         return pd.DataFrame(columns=["Opportunity", "Classification"])
 
 
-def save_classifications(df: pd.DataFrame):
-    """Save classifications to Google Sheet."""
+def save_classifications(updated_df: pd.DataFrame):
+    """
+    Merge updates with existing Google Sheet data (no clearing),
+    preserving other users' classifications.
+    """
     try:
         client = get_gsheet_client()
         sheet = client.open(SHEET_NAME).sheet1
-        sheet.clear()
-        set_with_dataframe(sheet, df)
-        st.toast("✅ Classifications saved to Google Sheet!")
+        existing_df = get_as_dataframe(sheet, evaluate_formulas=True, dtype=str).fillna("")
+
+        # Normalize columns
+        if existing_df.empty or "Opportunity" not in existing_df.columns:
+            existing_df = pd.DataFrame(columns=["Opportunity", "Classification"])
+
+        # Deduplicate by Opportunity (case-insensitive)
+        existing_df["Opportunity_lower"] = existing_df["Opportunity"].str.lower()
+        updated_df["Opportunity_lower"] = updated_df["Opportunity"].str.lower()
+
+        # Merge (updated values take precedence)
+        merged_df = pd.concat([existing_df, updated_df], ignore_index=True)
+        merged_df = (
+            merged_df.sort_values(by="Opportunity_lower")
+            .drop_duplicates(subset="Opportunity_lower", keep="last")
+            .drop(columns=["Opportunity_lower"])
+        )
+
+        merged_df = merged_df.fillna("")
+        set_with_dataframe(sheet, merged_df)
+        st.toast("✅ Classifications merged & saved to Google Sheet!")
     except Exception as e:
-        st.error(f"Error saving to Google Sheet: {e}")
+        st.error(f"💥 Error saving to Google Sheet: {e}")
 
 
 # -----------------------------------------------------------------------------
@@ -91,14 +114,16 @@ def sync_new_opportunities(existing_df: pd.DataFrame, new_ops: list) -> pd.DataF
     return existing_df
 
 
-def sanitize_text(text: str) -> str:
-    """Clean non-ASCII and problematic characters for PDF output."""
-    if not isinstance(text, str):
+def clean_for_pdf(s: str) -> str:
+    """Ensure text is ASCII-safe and FPDF-compatible."""
+    if not isinstance(s, str):
         return ""
-    text = text.replace("\xa0", " ").replace("\t", " ").replace("\r", " ").replace("\n", " ")
-    text = re.sub(r"[^\x20-\x7E]", "", text)
-    text = re.sub(r"\s{2,}", " ", text)
-    return text.strip()
+    s = unicodedata.normalize("NFKD", s)
+    s = re.sub(r"[\u200B-\u200D\uFEFF]", "", s)
+    s = s.replace("\u00A0", " ")
+    s = re.sub(r"[^\x20-\x7E]", "", s)
+    s = re.sub(r"\s{2,}", " ", s).strip()
+    return s
 
 
 # -----------------------------------------------------------------------------
@@ -132,13 +157,16 @@ def generate_pdf(store_num: str, oe_cycle: str, df: pd.DataFrame) -> BytesIO:
             pdf.multi_cell(0, 6, "— None —")
         else:
             for _, row in items.iterrows():
-                text = sanitize_text(row["Opportunity"])
+                text = clean_for_pdf(row["Opportunity"])
+                if not text:
+                    text = "[Empty line]"
                 if len(text) > 220:
                     text = text[:220] + "..."
                 try:
                     pdf.multi_cell(0, 6, f"- {text}")
                 except Exception:
-                    pdf.multi_cell(0, 6, "- [Unable to render line]")
+                    safe_text = re.sub(r"[^A-Za-z0-9 .,!?-]", "", text)
+                    pdf.multi_cell(0, 6, f"- {safe_text[:100]} [PDF sanitized]")
         pdf.ln(4)
 
     section("FRONT OF HOUSE (FOH)", foh_items)
@@ -197,17 +225,9 @@ if user_input.strip():
         st.divider()
 
         if st.button("💾 Save & Generate PDF One Pager"):
-            for opp, selected in updated_rows:
-                mask = classification_db["Opportunity"].str.lower() == opp.lower()
-                if mask.any():
-                    classification_db.loc[mask, "Classification"] = selected
-                else:
-                    classification_db.loc[len(classification_db)] = [opp, selected]
-            save_classifications(classification_db)
-
             session_df = pd.DataFrame(updated_rows, columns=["Opportunity", "Classification"])
+            save_classifications(session_df)
             pdf_data = generate_pdf(store_num, oe_cycle, session_df)
-
             st.download_button(
                 label="⬇️ Download PDF One Pager",
                 data=pdf_data,
