@@ -4,6 +4,12 @@ import os
 from fpdf import FPDF
 import io
 
+# --- 🔧 Full Reset on Startup (clears cache + session) ---
+st.cache_data.clear()
+st.cache_resource.clear()
+for key in list(st.session_state.keys()):
+    del st.session_state[key]
+
 st.set_page_config(page_title="IHOP OE One Pager", layout="wide")
 
 FILE_PATH = "OE_Opportunities_Classification.xlsx"
