@@ -1,137 +1,103 @@
 import streamlit as st
 import pandas as pd
 from fpdf import FPDF
-from io import BytesIO
-import base64
-import datetime
+import os
 
-# --- 💣 Absolute Clean Reset ---
-def reset_everything():
-    # Clear Streamlit's cache and all session data
-    st.cache_data.clear()
-    st.cache_resource.clear()
-    for key in list(st.session_state.keys()):
-        st.session_state.pop(key, None)
-
-# Force reset on first load only
-if "initialized" not in st.session_state:
-    reset_everything()
-    st.session_state["initialized"] = True
-
-# Optional manual reset button (in sidebar)
-with st.sidebar:
-    if st.button("🔄 Reset App"):
-        reset_everything()
-        st.experimental_rerun()
-
-st.set_page_config(
-    page_title="IHOP OE One Pager",
-    page_icon="🥞",
-    layout="centered",
-)
+# ---------- PAGE CONFIG ----------
+st.set_page_config(page_title="IHOP OE One Pager", layout="centered")
 st.title("🥞 IHOP OE One Pager")
-st.caption("Generate and verify OE opportunities for each restaurant.")
 
+# ---------- LOGO ----------
+logo_path = "logo.png"  # make sure logo.png is in your project root
+if os.path.exists(logo_path):
+    st.image(logo_path, use_column_width=False, width=150)
+else:
+    st.warning("Logo not found — add a file named 'logo.png' in the app root.")
 
-st.markdown("### Paste text here *(one line per row)*")
-user_input = st.text_area(
-    "",
-    placeholder="Paste text here (one line per row)",
-    height=150
+st.markdown("---")
+
+# ---------- TEXT INPUT ----------
+text_input = st.text_area(
+    "Paste text here (one line per row)",
+    height=150,
+    placeholder="Paste text here (one line per row). Each opportunity should be on its own line."
 )
 
-# Handle pasted text
-if user_input.strip():
-    new_items = [line.strip() for line in user_input.split("\n") if line.strip()]
-    new_df = pd.DataFrame(new_items, columns=["Opportunity"])
-    df = pd.concat([df, new_df], ignore_index=True).drop_duplicates(subset=["Opportunity"])
-
-# Interface for verification/classification
-st.markdown("## Please Verify Each Opportunity (FOH / BOH / BOTH)")
-
-updated_rows = []
-for i, row in df.iterrows():
-    if pd.isna(row["Classification"]) or row["Classification"] == "":
-        st.markdown(f"⚠️ **{row['Opportunity']}**")
-    else:
-        st.markdown(f"**{row['Opportunity']}**")
-
-    classification = st.radio(
-        f"Select category for: {row['Opportunity']}",
-        ["", "FOH", "BOH", "BOTH"],
-        index=["", "FOH", "BOH", "BOTH"].index(row["Classification"]) if row["Classification"] in ["FOH", "BOH", "BOTH"] else 0,
-        key=f"class_{i}",
-        horizontal=True
-    )
-    updated_rows.append({"Opportunity": row["Opportunity"], "Classification": classification})
-
-# Save updates
-df = pd.DataFrame(updated_rows)
-df.to_excel(FILE_PATH, index=False)
-st.success(f"✅ Classifications saved to {FILE_PATH}")
-
-# Status banner
-unclassified = df["Classification"].isna().sum() + (df["Classification"] == "").sum()
-if unclassified > 0:
-    st.warning(f"⚠ {unclassified} opportunities still need classification.")
+# Create DataFrame only if there’s input
+if text_input:
+    # ignore lines that are headers or section titles
+    lines = [line.strip() for line in text_input.split("\n") if line.strip() and ":" not in line]
+    df = pd.DataFrame(lines, columns=["Opportunity"])
 else:
-    st.success("✅ All opportunities have been verified and classified!")
+    df = pd.DataFrame(columns=["Opportunity"])
 
-# PDF info inputs
-st.markdown("---")
-st.markdown("### 🏪 PDF Export Details")
-store_number = st.text_input("Store Number", placeholder="e.g., 4445")
-oe_cycle = st.text_input("OE Cycle", placeholder="e.g., Cycle 2 - July 2025")
+# ---------- CLASSIFICATION ----------
+if not df.empty:
+    st.subheader("Please Verify Each Opportunity (FOH / BOH / BOTH)")
 
-# PDF generator
-def generate_pdf(dataframe, store_number, oe_cycle):
-    pdf = FPDF()
-    pdf.add_page()
+    classifications = []
+    for i, row in df.iterrows():
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.text(row["Opportunity"])
+        with col2:
+            choice = st.radio(
+                "Select", ["FOH", "BOH", "BOTH"],
+                horizontal=True,
+                key=f"class_{i}"
+            )
+        classifications.append(choice)
+    df["Classification"] = classifications
 
-    # Logo
-    if os.path.exists(LOGO_PATH):
-        pdf.image(LOGO_PATH, x=80, y=8, w=50)
-        pdf.ln(35)
-    else:
-        pdf.set_font("Arial", "B", 16)
-        pdf.cell(200, 10, txt="IHOP OE One Pager", ln=True, align="C")
-        pdf.ln(10)
+    st.markdown("---")
 
-    # Header
-    pdf.set_font("Arial", "B", 14)
-    pdf.cell(0, 10, f"Store #: {store_number}", ln=True, align="C")
-    pdf.cell(0, 10, f"OE Cycle: {oe_cycle}", ln=True, align="C")
-    pdf.ln(10)
+    # ---------- GROUPING ----------
+    grouped = df.groupby("Classification")["Opportunity"].apply(list).to_dict()
 
-    # Group by classification
-    pdf.set_font("Arial", "B", 12)
-    for section in ["FOH", "BOH", "BOTH"]:
-        filtered = dataframe[dataframe["Classification"] == section]
-        if not filtered.empty:
-            pdf.cell(0, 10, txt=f"{section} Opportunities", ln=True)
-            pdf.set_font("Arial", size=11)
-            for _, row in filtered.iterrows():
-                pdf.multi_cell(0, 8, f"• {row['Opportunity']}")
-            pdf.ln(5)
-            pdf.set_font("Arial", "B", 12)
+    st.success("All items verified! Ready to generate your one-pager PDF.")
 
-    # Footer
-    pdf.set_font("Arial", "I", 9)
-    pdf.cell(0, 10, txt="Generated by IHOP OE One Pager", ln=True, align="C")
+    # ---------- PDF GENERATION ----------
+    st.subheader("📄 Generate PDF")
 
-    buffer = io.BytesIO()
-    pdf.output(buffer)
-    return buffer.getvalue()
+    store_number = st.text_input("Enter Store Number:")
+    oe_cycle = st.text_input("Enter OE Cycle (e.g. 'Cycle 2, 2025')")
 
-# Generate PDF only when ready
-if st.button("📄 Generate One-Pager PDF"):
-    if not store_number or not oe_cycle:
-        st.error("⚠ Please enter both Store Number and OE Cycle before generating the PDF.")
-    else:
-        pdf_bytes = generate_pdf(df, store_number, oe_cycle)
-        st.download_button(
-            label="⬇ Download One-Pager PDF",
-            data=pdf_bytes,
-            file_name=f"OE_OnePager_{store_number}_{oe_cycle}.pdf",
-            mime="application/pdf"
-        )
+    if st.button("Generate One Pager PDF"):
+        if not store_number or not oe_cycle:
+            st.error("Please enter both Store Number and OE Cycle.")
+        else:
+            pdf = FPDF()
+            pdf.add_page()
+            pdf.set_auto_page_break(auto=True, margin=15)
+
+            # Header / Logo
+            if os.path.exists(logo_path):
+                pdf.image(logo_path, x=80, w=50)  # centered
+            pdf.ln(30)
+            pdf.set_font("Helvetica", "B", 16)
+            pdf.cell(0, 10, f"IHOP OE One Pager", ln=True, align="C")
+            pdf.set_font("Helvetica", "", 12)
+            pdf.cell(0, 10, f"Store: {store_number} | {oe_cycle}", ln=True, align="C")
+            pdf.ln(10)
+
+            # Add grouped items
+            for section in ["FOH", "BOH", "BOTH"]:
+                if section in grouped:
+                    pdf.set_font("Helvetica", "B", 14)
+                    pdf.cell(0, 10, section, ln=True)
+                    pdf.set_font("Helvetica", "", 12)
+                    for item in grouped[section]:
+                        pdf.multi_cell(0, 8, f"• {item}")
+                    pdf.ln(5)
+
+            output_path = "IHOP_OE_OnePager.pdf"
+            pdf.output(output_path)
+            with open(output_path, "rb") as f:
+                st.download_button(
+                    label="⬇️ Download One Pager PDF",
+                    data=f,
+                    file_name=f"IHOP_OE_{store_number}.pdf",
+                    mime="application/pdf"
+                )
+else:
+    st.info("Paste opportunities above to begin classification.")
