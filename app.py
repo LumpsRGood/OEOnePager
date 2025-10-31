@@ -71,19 +71,23 @@ def normalize_text(s: str) -> str:
 # SAVE / MERGE
 # -----------------------------------------------------------------------------
 def save_classifications_merge(updates_df):
-    """Reliable merge with round-trip normalization and verification."""
+    """Reliable merge with fuzzy normalization, punctuation cleanup, and verified writes."""
     try:
         ws = open_ws()
         existing_df = df_from_ws(ws)
 
-        # Normalize and clean both dataframes
+        def normalize_key(s):
+            s = normalize_text(s)
+            s = re.sub(r"[\W_]+$", "", s)  # strip trailing punctuation
+            s = re.sub(r"\s+", " ", s).strip().lower()
+            return s
+
         for df in (existing_df, updates_df):
             df["Opportunity"] = df["Opportunity"].apply(normalize_text)
             df["Classification"] = df["Classification"].astype(str).str.strip()
 
-        # Merge on normalized keys
-        existing_df["__key"] = existing_df["Opportunity"].str.lower()
-        updates_df["__key"] = updates_df["Opportunity"].str.lower()
+        existing_df["__key"] = existing_df["Opportunity"].apply(normalize_key)
+        updates_df["__key"] = updates_df["Opportunity"].apply(normalize_key)
 
         merged = (
             pd.concat([existing_df, updates_df], ignore_index=True)
@@ -94,20 +98,18 @@ def save_classifications_merge(updates_df):
             .astype(str)
         )
 
-        # Debug: see if the BDP line is actually present
+        # Verify that our BDP key collapses properly
         bdp_check = merged[merged["Opportunity"].str.contains("BDP", case=False)]
         if not bdp_check.empty:
-            st.write("🧩 Debug – BDP line just before writing:")
+            st.write("🧩 Debug – After fuzzy normalization (unique BDP rows):")
             st.dataframe(bdp_check)
 
-        # Double-encode to be 100% Sheets-safe
         merged["Opportunity"] = (
             merged["Opportunity"]
             .apply(lambda x: x.encode("ascii", "ignore").decode("ascii"))
             .apply(normalize_text)
         )
 
-        # Write in full with new API style
         ws.clear()
         ws.resize(len(merged) + 1, 2)
         header = [["Opportunity", "Classification"]]
@@ -115,21 +117,20 @@ def save_classifications_merge(updates_df):
 
         ws.update(header + data_rows, range_name="A1", value_input_option="RAW")
 
-        # Verify write success
+        st.success(f"✅ {len(merged)} total rows written to Google Sheet.")
+
         new_vals = ws.get_all_values()
         bdp_rows = [r for r in new_vals if "BDP" in " ".join(r)]
         if bdp_rows:
-            st.success(f"✅ Verified BDP row written: {bdp_rows}")
+            st.success(f"✅ Verified BDP row(s) now written: {bdp_rows}")
         else:
-            st.warning("⚠️ BDP row not detected after write – normalization mismatch persists.")
+            st.warning("⚠️ BDP row not found post-write.")
 
-        st.success(f"✅ {len(new_vals) - 1} total rows written to Google Sheet.")
         return merged
 
     except Exception as e:
         st.error(f"💥 Save error: {e}")
         return None
-
 # -----------------------------------------------------------------------------
 # UTILITIES
 # -----------------------------------------------------------------------------
