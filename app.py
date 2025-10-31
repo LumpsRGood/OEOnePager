@@ -151,7 +151,22 @@ def generate_pdf(store_num, oe_cycle, df):
     pdf.line(margin_left, pdf.get_y(), 210 - margin_right, pdf.get_y())
     pdf.ln(8)
 
-    # --- Section helper functions ---
+    # --- Text sanitizer ---
+    def safe_text(text):
+        """Force ASCII-compatible text for FPDF core fonts."""
+        text = normalize_text(text)
+        # Replace “smart quotes”, dashes, and bullets with ASCII equivalents
+        replacements = {
+            "“": '"', "”": '"', "‘": "'", "’": "'",
+            "–": "-", "—": "-", "•": "-", "●": "-",
+            "°": " deg", "…": "...", "→": "->",
+        }
+        for bad, good in replacements.items():
+            text = text.replace(bad, good)
+        text = re.sub(r"[^\x20-\x7E]", "", text)  # remove any leftover non-ASCII
+        return text.strip()
+
+    # --- Section helpers ---
     def section_header(title, color=(0, 102, 204)):
         pdf.set_font("Arial", "B", 13)
         pdf.set_text_color(*color)
@@ -164,7 +179,7 @@ def generate_pdf(store_num, oe_cycle, df):
     def bullet_item(text):
         pdf.set_font("Arial", "", 11)
         pdf.set_text_color(0, 0, 0)
-        text = normalize_text(text) or "[Empty]"
+        text = safe_text(text)
         pdf.multi_cell(content_width, line_spacing, f"• {text}")
         pdf.ln(1)
 
@@ -180,11 +195,11 @@ def generate_pdf(store_num, oe_cycle, df):
                 bullet_item(row["Opportunity"])
             pdf.ln(4)
 
-    # --- Data Split ---
+    # --- Split Data ---
     foh = df[df["Classification"].isin(["FOH", "BOTH"])]
     boh = df[df["Classification"].isin(["BOH", "BOTH"])]
 
-    # --- Summary Box ---
+    # --- Summary ---
     total_foh = len(foh)
     total_boh = len(boh)
     pdf.set_font("Arial", "B", 11)
