@@ -8,7 +8,7 @@ st.set_page_config(page_title="IHOP OE One Pager", layout="centered")
 st.title("🥞 IHOP OE One Pager")
 
 # ---------- LOGO ----------
-logo_path = "logo.png"  # make sure logo.png is in your project root
+logo_path = "ihop_logo.png"  # make sure logo.png is in your project root
 if os.path.exists(logo_path):
     st.image(logo_path, use_column_width=False, width=150)
 else:
