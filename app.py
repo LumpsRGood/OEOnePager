@@ -71,24 +71,21 @@ def normalize_text(s: str) -> str:
 # SAVE / MERGE
 # -----------------------------------------------------------------------------
 def save_classifications_merge(updates_df):
-    """Reliable merge with fuzzy normalization, punctuation cleanup, and verified writes."""
+    """Strict merge that preserves every unique typed line (no fuzzy matching)."""
     try:
         ws = open_ws()
         existing_df = df_from_ws(ws)
 
-        def normalize_key(s):
-            s = normalize_text(s)
-            s = re.sub(r"[\W_]+$", "", s)  # strip trailing punctuation
-            s = re.sub(r"\s+", " ", s).strip().lower()
-            return s
-
+        # Clean both DataFrames consistently
         for df in (existing_df, updates_df):
             df["Opportunity"] = df["Opportunity"].apply(normalize_text)
             df["Classification"] = df["Classification"].astype(str).str.strip()
 
-        existing_df["__key"] = existing_df["Opportunity"].apply(normalize_key)
-        updates_df["__key"] = updates_df["Opportunity"].apply(normalize_key)
+        # Create comparison key purely based on normalized lowercase
+        existing_df["__key"] = existing_df["Opportunity"].str.lower()
+        updates_df["__key"] = updates_df["Opportunity"].str.lower()
 
+        # Merge strictly on identical normalized text
         merged = (
             pd.concat([existing_df, updates_df], ignore_index=True)
             .sort_values("__key")
@@ -98,33 +95,27 @@ def save_classifications_merge(updates_df):
             .astype(str)
         )
 
-        # Verify that our BDP key collapses properly
-        bdp_check = merged[merged["Opportunity"].str.contains("BDP", case=False)]
-        if not bdp_check.empty:
-            st.write("🧩 Debug – After fuzzy normalization (unique BDP rows):")
-            st.dataframe(bdp_check)
-
+        # Ensure the text itself remains ASCII-safe
         merged["Opportunity"] = (
             merged["Opportunity"]
             .apply(lambda x: x.encode("ascii", "ignore").decode("ascii"))
             .apply(normalize_text)
         )
 
+        # Write entire sheet cleanly
         ws.clear()
         ws.resize(len(merged) + 1, 2)
         header = [["Opportunity", "Classification"]]
         data_rows = merged.values.tolist()
-
         ws.update(header + data_rows, range_name="A1", value_input_option="RAW")
 
         st.success(f"✅ {len(merged)} total rows written to Google Sheet.")
 
-        new_vals = ws.get_all_values()
-        bdp_rows = [r for r in new_vals if "BDP" in " ".join(r)]
-        if bdp_rows:
-            st.success(f"✅ Verified BDP row(s) now written: {bdp_rows}")
-        else:
-            st.warning("⚠️ BDP row not found post-write.")
+        # Debug confirmation for "BDP"
+        bdp_rows = merged[merged["Opportunity"].str.contains("BDP", case=False)]
+        if not bdp_rows.empty:
+            st.write("🧩 Debug – BDP entries written:")
+            st.dataframe(bdp_rows)
 
         return merged
 
