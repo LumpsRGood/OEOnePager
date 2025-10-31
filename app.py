@@ -54,38 +54,54 @@ def df_from_ws(ws):
     return df[df["Opportunity"].str.strip() != ""].reset_index(drop=True)
 
 # -----------------------------------------------------------------------------
-# NORMALIZATION FIX
+# NORMALIZATION
 # -----------------------------------------------------------------------------
 def normalize_text(s: str) -> str:
-    """Normalize invisible characters, dashes, and encoding quirks."""
+    """Normalize invisible characters, dashes, and spaces."""
     if not isinstance(s, str):
         return ""
     s = unicodedata.normalize("NFKC", s)
-    s = re.sub(r"[\u200B-\u200D\uFEFF]", "", s)  # zero-width chars
+    s = re.sub(r"[\u200B-\u200D\uFEFF]", "", s)  # zero-width
     s = s.replace("\u2013", "-").replace("\u2014", "-")  # en/em dash
     s = s.replace("\u00A0", " ")  # NBSP
     s = re.sub(r"[^\x20-\x7E]", "", s)  # strip non-ASCII
     return s.strip()
 
 # -----------------------------------------------------------------------------
+# FORCE OVERWRITE WRITER
+# -----------------------------------------------------------------------------
+def force_overwrite(ws, merged):
+    """Force Sheets to accept every write (avoids 'sticky' rows)."""
+    ws.clear()
+    ws.resize(len(merged) + 1, 2)
+    header = [["Opportunity", "Classification"]]
+    data_rows = merged.values.tolist()
+    chunk_size = 50
+
+    for i in range(0, len(data_rows), chunk_size):
+        chunk = data_rows[i:i+chunk_size]
+        if i == 0:
+            ws.update(header + chunk, range_name="A1", value_input_option="RAW")
+        else:
+            start_row = i + 1
+            ws.update(chunk, range_name=f"A{start_row}:B{start_row+len(chunk)-1}", value_input_option="RAW")
+
+# -----------------------------------------------------------------------------
 # SAVE / MERGE
 # -----------------------------------------------------------------------------
 def save_classifications_merge(updates_df):
-    """Strict merge that preserves every unique typed line (no fuzzy matching)."""
+    """Strict merge — preserves user text and forces overwrite."""
     try:
         ws = open_ws()
         existing_df = df_from_ws(ws)
 
-        # Clean both DataFrames consistently
         for df in (existing_df, updates_df):
             df["Opportunity"] = df["Opportunity"].apply(normalize_text)
             df["Classification"] = df["Classification"].astype(str).str.strip()
 
-        # Create comparison key purely based on normalized lowercase
         existing_df["__key"] = existing_df["Opportunity"].str.lower()
         updates_df["__key"] = updates_df["Opportunity"].str.lower()
 
-        # Merge strictly on identical normalized text
         merged = (
             pd.concat([existing_df, updates_df], ignore_index=True)
             .sort_values("__key")
@@ -95,23 +111,16 @@ def save_classifications_merge(updates_df):
             .astype(str)
         )
 
-        # Ensure the text itself remains ASCII-safe
         merged["Opportunity"] = (
             merged["Opportunity"]
             .apply(lambda x: x.encode("ascii", "ignore").decode("ascii"))
             .apply(normalize_text)
         )
 
-        # Write entire sheet cleanly
-        ws.clear()
-        ws.resize(len(merged) + 1, 2)
-        header = [["Opportunity", "Classification"]]
-        data_rows = merged.values.tolist()
-        ws.update(header + data_rows, range_name="A1", value_input_option="RAW")
+        force_overwrite(ws, merged)
 
         st.success(f"✅ {len(merged)} total rows written to Google Sheet.")
 
-        # Debug confirmation for "BDP"
         bdp_rows = merged[merged["Opportunity"].str.contains("BDP", case=False)]
         if not bdp_rows.empty:
             st.write("🧩 Debug – BDP entries written:")
@@ -122,6 +131,7 @@ def save_classifications_merge(updates_df):
     except Exception as e:
         st.error(f"💥 Save error: {e}")
         return None
+
 # -----------------------------------------------------------------------------
 # UTILITIES
 # -----------------------------------------------------------------------------
@@ -139,9 +149,6 @@ def extract_opportunities(raw_text):
             continue
         opps.append(line)
     return opps
-
-def clean_for_pdf(s):
-    return normalize_text(s)
 
 # -----------------------------------------------------------------------------
 # PDF
@@ -163,7 +170,7 @@ def generate_pdf(store_num, oe_cycle, df):
     pdf.ln(6)
 
     def bullet_line(t):
-        t = clean_for_pdf(t) or "[Empty]"
+        t = normalize_text(t) or "[Empty]"
         pdf.set_font("Helvetica", "", 10)
         pdf.cell(bullet_w, 6, "- ", new_x=XPos.RIGHT, new_y=YPos.TOP)
         try:
