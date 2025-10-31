@@ -153,17 +153,18 @@ def generate_pdf(store_num, oe_cycle, df):
 
     # --- Text sanitizer ---
     def safe_text(text):
-        """Force ASCII-compatible text for FPDF core fonts."""
+        """Force ASCII-safe text for FPDF."""
         text = normalize_text(text)
-        # Replace “smart quotes”, dashes, and bullets with ASCII equivalents
         replacements = {
             "“": '"', "”": '"', "‘": "'", "’": "'",
             "–": "-", "—": "-", "•": "-", "●": "-",
             "°": " deg", "…": "...", "→": "->",
+            "▪": "-", "·": "-", "•": "-", "—": "-", "–": "-",
         }
         for bad, good in replacements.items():
             text = text.replace(bad, good)
-        text = re.sub(r"[^\x20-\x7E]", "", text)  # remove any leftover non-ASCII
+        # remove any non-ASCII leftovers
+        text = re.sub(r"[^\x20-\x7E]", "", text)
         return text.strip()
 
     # --- Section helpers ---
@@ -180,7 +181,7 @@ def generate_pdf(store_num, oe_cycle, df):
         pdf.set_font("Arial", "", 11)
         pdf.set_text_color(0, 0, 0)
         text = safe_text(text)
-        pdf.multi_cell(content_width, line_spacing, f"• {text}")
+        pdf.multi_cell(content_width, line_spacing, f"- {text}")
         pdf.ln(1)
 
     def section(title, subset):
