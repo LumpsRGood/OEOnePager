@@ -13,16 +13,18 @@ from fpdf import FPDF
 # CONFIG
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="IHOP OE One Pager", layout="wide")
-LOGO_PATH = "ihop_logo.png"
-CLASS_CHOICES = ("FOH", "BOH", "BOTH")
 
-# Google Sheets details from secrets.toml
+LOGO_PATH = "ihop_logo.png"
+CLASS_CHOICES = ["FOH", "BOH", "BOTH"]
+
+# ---- Load secrets safely ----
 try:
     SPREADSHEET_ID = st.secrets["gsheets"]["spreadsheet_id"]
     WORKSHEET_TITLE = st.secrets["gsheets"].get("worksheet_title", "Sheet1")
 except Exception:
-    st.error("❌ Missing `[gsheets]` section in secrets.toml — add spreadsheet_id and worksheet_title.")
+    st.error("❌ Missing [gsheets] in secrets.toml (spreadsheet_id, worksheet_title)")
     st.stop()
+
 
 # -----------------------------------------------------------------------------
 # GOOGLE SHEETS CONNECTION
@@ -36,8 +38,8 @@ def get_gsheet_client():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_info, scope)
     return gspread.authorize(creds)
 
+
 def open_ws():
-    """Open target worksheet, create if missing."""
     client = get_gsheet_client()
     ss = client.open_by_key(SPREADSHEET_ID)
     try:
@@ -47,8 +49,9 @@ def open_ws():
         ws.update("A1:B1", [["Opportunity", "Classification"]])
     return ws
 
+
 def df_from_ws(ws):
-    """Read entire worksheet into a DataFrame."""
+    """Read entire worksheet as a clean DataFrame."""
     vals = ws.get_all_values()
     if not vals:
         return pd.DataFrame(columns=["Opportunity", "Classification"])
@@ -57,11 +60,12 @@ def df_from_ws(ws):
         if col not in df.columns:
             df[col] = ""
     df = df[["Opportunity", "Classification"]].fillna("")
-    df = df[(df["Opportunity"].astype(str).str.strip() != "")]
-    return df.reset_index(drop=True).astype(str)
+    df = df[df["Opportunity"].astype(str).str.strip() != ""]
+    return df.astype(str).reset_index(drop=True)
 
-def save_classifications_merge(updates_df: pd.DataFrame):
-    """Reliable merge + write with live verification."""
+
+def save_classifications_merge(updates_df):
+    """Merge updates with existing sheet data."""
     try:
         ws = open_ws()
         existing_df = df_from_ws(ws)
@@ -85,18 +89,21 @@ def save_classifications_merge(updates_df: pd.DataFrame):
         rows = [list(merged.columns)] + merged.values.tolist()
         ws.clear()
         ws.resize(rows=len(rows), cols=len(rows[0]))
-        ws.update(f"A1:B{len(rows)}", rows, value_input_option="RAW")
+        ws.update("A1", rows, value_input_option="RAW")
 
-        new_vals = ws.get_all_values()
-        st.success(f"✅ {len(merged)} rows now stored in Google Sheet ({len(new_vals) - 1} data rows).")
+        st.success(f"✅ Saved {len(merged)} total rows to Google Sheet.")
+        return merged
+
     except Exception as e:
         st.error(f"💥 Error saving to Google Sheets: {e}")
+        return None
+
 
 # -----------------------------------------------------------------------------
 # UTILITIES
 # -----------------------------------------------------------------------------
-def extract_opportunities(raw_text: str):
-    """Extract valid opportunity lines from user text."""
+def extract_opportunities(raw_text):
+    """Extract valid opportunity lines."""
     lines = [l.strip() for l in raw_text.split("\n") if l.strip()]
     opps = []
     for line in lines:
@@ -110,8 +117,8 @@ def extract_opportunities(raw_text: str):
         opps.append(line)
     return opps
 
+
 def clean_for_pdf(s: str):
-    """Sanitize text for PDF rendering."""
     if not isinstance(s, str):
         return ""
     s = unicodedata.normalize("NFKD", s)
@@ -121,10 +128,11 @@ def clean_for_pdf(s: str):
     s = re.sub(r"\s{2,}", " ", s).strip()
     return s
 
+
 # -----------------------------------------------------------------------------
-# PDF GENERATION (safe & formatted)
+# PDF GENERATION
 # -----------------------------------------------------------------------------
-def generate_pdf(store_num: str, oe_cycle: str, df: pd.DataFrame):
+def generate_pdf(store_num, oe_cycle, df):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -142,19 +150,16 @@ def generate_pdf(store_num: str, oe_cycle: str, df: pd.DataFrame):
     pdf.cell(0, 10, f"Store #{store_num} | OE Cycle: {oe_cycle}", new_x="LMARGIN", new_y="NEXT", align="C")
     pdf.ln(6)
 
-    def bullet_line(txt):
-        t = clean_for_pdf(txt)
-        if not t:
-            t = "[Empty]"
-        if len(t) > 500:
-            t = t[:500] + "..."
+    def bullet_line(t):
+        text = clean_for_pdf(t)
+        if not text:
+            text = "[Empty]"
         pdf.set_font("Helvetica", "", 10)
         pdf.cell(bullet_w, 6, "- ", ln=0)
         try:
-            pdf.multi_cell(text_w, 6, t)
+            pdf.multi_cell(text_w, 6, text)
         except Exception:
-            safe = re.sub(r"[^A-Za-z0-9 .,!?-]", "", t)[:150]
-            pdf.multi_cell(text_w, 6, safe + " [sanitized]")
+            pdf.multi_cell(text_w, 6, re.sub(r"[^A-Za-z0-9 .,!?-]", "", text)[:100])
 
     def section(title, subset):
         pdf.set_font("Helvetica", "B", 12)
@@ -177,56 +182,69 @@ def generate_pdf(store_num: str, oe_cycle: str, df: pd.DataFrame):
     pdf.set_font("Helvetica", "I", 9)
     pdf.cell(0, 8, f"Generated {datetime.now():%Y-%m-%d %H:%M}", align="R")
 
-    buffer = BytesIO()
-    pdf.output(buffer)
-    buffer.seek(0)
-    return buffer
+    buf = BytesIO()
+    pdf.output(buf)
+    buf.seek(0)
+    return buf
+
 
 # -----------------------------------------------------------------------------
 # STREAMLIT UI
 # -----------------------------------------------------------------------------
+st.image(LOGO_PATH, width=120) if os.path.exists(LOGO_PATH) else None
+st.title("🥞 IHOP OE One Pager")
+
 try:
     ws_test = open_ws()
-    st.success(f"✅ Connected to Google Sheet: **{WORKSHEET_TITLE}** (ID: {SPREADSHEET_ID})")
+    st.success(f"✅ Connected to Google Sheet: {WORKSHEET_TITLE}")
 except Exception as e:
     st.error(f"❌ Could not connect to Google Sheets: {e}")
     st.stop()
-
-if os.path.exists(LOGO_PATH):
-    st.image(LOGO_PATH, width=120)
-st.title("🥞 IHOP OE One Pager")
 
 store_num = st.text_input("Store Number")
 oe_cycle = st.text_input("OE Cycle")
 user_input = st.text_area("Paste OE Notes or Opportunities Below:", height=250)
 
+classification_db = df_from_ws(ws_test)
+
 if user_input.strip():
     opportunities = extract_opportunities(user_input)
     st.write(f"✅ Found **{len(opportunities)}** valid opportunities.")
+
     if opportunities:
         st.divider()
         st.markdown("### 🏷️ Review & Confirm Classifications")
 
         updated_rows = []
         for opp in opportunities:
+            # check if already classified
+            match = classification_db.loc[
+                classification_db["Opportunity"].str.lower() == opp.lower(), "Classification"
+            ]
+            preselect = match.iloc[0] if len(match) > 0 and match.iloc[0] in CLASS_CHOICES else "FOH"
+
             selected = st.radio(
-                f"**{opp}**", CLASS_CHOICES,
-                horizontal=True, key=opp, index=0
+                f"**{opp}**",
+                CLASS_CHOICES,
+                horizontal=True,
+                key=opp,
+                index=CLASS_CHOICES.index(preselect),
             )
             updated_rows.append((opp, selected))
 
-        st.warning("⚠️ Review classifications before generating the PDF.")
+        st.warning("⚠️ Review classifications before generating PDF.")
         st.divider()
 
         if st.button("💾 Save & Generate PDF One Pager"):
             updates_df = pd.DataFrame(updated_rows, columns=["Opportunity", "Classification"])
-            save_classifications_merge(updates_df)
-            pdf_data = generate_pdf(store_num, oe_cycle, updates_df)
-            st.download_button(
-                label="⬇️ Download PDF One Pager",
-                data=pdf_data,
-                file_name=f"IHOP_OE_{store_num}_{oe_cycle}_{datetime.now():%Y%m%d}.pdf",
-                mime="application/pdf",
-            )
+            merged = save_classifications_merge(updates_df)
+            if merged is not None:
+                pdf_data = generate_pdf(store_num, oe_cycle, updates_df)
+                st.download_button(
+                    label="⬇️ Download PDF One Pager",
+                    data=pdf_data,
+                    file_name=f"IHOP_OE_{store_num}_{oe_cycle}_{datetime.now():%Y%m%d}.pdf",
+                    mime="application/pdf",
+                )
 else:
     st.info("Enter store info and paste OE notes to begin.")
