@@ -3,20 +3,21 @@ import os
 import re
 import pandas as pd
 import streamlit as st
-from fpdf import FPDF
 from datetime import datetime
+from io import BytesIO
+from fpdf import FPDF
 
 st.set_page_config(page_title="IHOP OE One Pager", layout="wide")
 
 LOGO_PATH = "ihop_logo.png"
 EXCEL_FILE = "OE_Opportunities_Classification.xlsx"
 
-
 # --- Utility Functions ---
+
 
 @st.cache_data
 def load_classifications(path: str) -> pd.DataFrame:
-    """Load or create the classification database."""
+    """Load or create classification database."""
     if os.path.exists(path):
         df = pd.read_excel(path)
     else:
@@ -27,13 +28,13 @@ def load_classifications(path: str) -> pd.DataFrame:
 
 
 def save_classifications(df: pd.DataFrame, path: str):
-    """Persist updated classification database."""
+    """Save classification DB to Excel."""
     df.to_excel(path, index=False)
-    st.toast("✅ Updated classifications saved.")
+    st.toast("✅ Classification database updated.")
 
 
 def extract_opportunities(raw_text: str):
-    """Extract clean, meaningful opportunities."""
+    """Extract opportunity-like lines from pasted notes."""
     lines = [l.strip() for l in raw_text.split("\n") if l.strip()]
     opportunities = []
     for l in lines:
@@ -43,45 +44,60 @@ def extract_opportunities(raw_text: str):
     return opportunities
 
 
-def generate_pdf(store_num: str, oe_cycle: str, df: pd.DataFrame):
-    """Generate a one-pager PDF report."""
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 16)
-
-    if os.path.exists(LOGO_PATH):
-        pdf.image(LOGO_PATH, x=10, y=8, w=30)
-
-    pdf.cell(200, 10, "IHOP OE One Pager", ln=True, align="C")
-    pdf.set_font("Arial", "", 12)
-    pdf.cell(200, 10, f"Store #{store_num} | OE Cycle: {oe_cycle}", ln=True, align="C")
-    pdf.ln(10)
-
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(140, 8, "Opportunity", border=1)
-    pdf.cell(40, 8, "Classification", border=1, ln=True)
-
-    pdf.set_font("Arial", "", 11)
-    for _, row in df.iterrows():
-        pdf.cell(140, 8, row["Opportunity"][:80], border=1)
-        pdf.cell(40, 8, row["Classification"], border=1, ln=True)
-
-    filename = f"IHOP_OE_{store_num}_{oe_cycle}_{datetime.now():%Y%m%d}.pdf"
-    pdf.output(filename)
-    return filename
-
-
-def sync_new_opportunities(existing_df, new_ops):
-    """Add missing opportunities to classification DB."""
+def sync_new_opportunities(existing_df: pd.DataFrame, new_ops: list) -> pd.DataFrame:
+    """Add new opportunities to DB if not already present."""
     existing = set(existing_df["Opportunity"].str.lower())
     missing = [o for o in new_ops if o.lower() not in existing]
     if missing:
         st.info(f"🆕 Found {len(missing)} new opportunities to classify.")
         new_df = pd.DataFrame({"Opportunity": missing, "Classification": [""] * len(missing)})
-        updated_df = pd.concat([existing_df, new_df], ignore_index=True)
-    else:
-        updated_df = existing_df
-    return updated_df
+        return pd.concat([existing_df, new_df], ignore_index=True)
+    return existing_df
+
+
+def generate_pdf(store_num: str, oe_cycle: str, df: pd.DataFrame) -> BytesIO:
+    """Generate PDF with FOH and BOH sections using fpdf2."""
+    pdf = FPDF()
+    pdf.add_page()
+
+    # Add Unicode font (DejaVu bundled in fpdf2)
+    pdf.add_font("DejaVu", "", fname=None, uni=True)
+    pdf.set_font("DejaVu", "", 14)
+
+    # Logo
+    if os.path.exists(LOGO_PATH):
+        pdf.image(LOGO_PATH, x=10, y=8, w=30)
+
+    # Header
+    pdf.cell(200, 10, "IHOP OE One Pager", ln=True, align="C")
+    pdf.set_font("DejaVu", "", 11)
+    pdf.cell(200, 10, f"Store #{store_num} | OE Cycle: {oe_cycle}", ln=True, align="C")
+    pdf.ln(10)
+
+    # Split data
+    foh_items = df[df["Classification"].isin(["FOH", "BOTH"])]
+    boh_items = df[df["Classification"].isin(["BOH", "BOTH"])]
+
+    # Helper to print section
+    def section(title, items):
+        pdf.set_font("DejaVu", "B", 12)
+        pdf.cell(0, 8, title, ln=True)
+        pdf.set_font("DejaVu", "", 10)
+        for _, row in items.iterrows():
+            pdf.multi_cell(0, 6, f"• {row['Opportunity']}", align="L")
+        pdf.ln(4)
+
+    # Sections
+    if not foh_items.empty:
+        section("FRONT OF HOUSE (FOH)", foh_items)
+    if not boh_items.empty:
+        section("BACK OF HOUSE (BOH)", boh_items)
+
+    # Export to memory
+    pdf_bytes = BytesIO()
+    pdf.output(pdf_bytes)
+    pdf_bytes.seek(0)
+    return pdf_bytes
 
 
 # --- UI Layout ---
@@ -104,7 +120,6 @@ if user_input.strip():
         # Sync with master DB
         classification_db = sync_new_opportunities(classification_db, opportunities)
 
-        # Display classification check UI
         st.divider()
         st.markdown("### 🏷️ Review & Classify Opportunities")
 
@@ -119,7 +134,9 @@ if user_input.strip():
                 f"**{opp}**",
                 ["FOH", "BOH", "BOTH"],
                 horizontal=True,
-                index=["FOH", "BOH", "BOTH"].index(preselect) if preselect in ["FOH", "BOH", "BOTH"] else 0,
+                index=["FOH", "BOH", "BOTH"].index(preselect)
+                if preselect in ["FOH", "BOH", "BOTH"]
+                else 0,
                 key=opp,
             )
             updated_rows.append((opp, selected))
@@ -128,7 +145,7 @@ if user_input.strip():
         st.divider()
 
         if st.button("💾 Save & Generate PDF One Pager"):
-            # Update database
+            # Update DB
             for opp, selected in updated_rows:
                 mask = classification_db["Opportunity"].str.lower() == opp.lower()
                 if mask.any():
@@ -138,16 +155,15 @@ if user_input.strip():
 
             save_classifications(classification_db, EXCEL_FILE)
 
-            # Generate PDF for current session only
+            # Generate PDF from current session data
             session_df = pd.DataFrame(updated_rows, columns=["Opportunity", "Classification"])
-            pdf_path = generate_pdf(store_num, oe_cycle, session_df)
-            with open(pdf_path, "rb") as f:
-                st.download_button(
-                    label="⬇️ Download PDF One Pager",
-                    data=f,
-                    file_name=os.path.basename(pdf_path),
-                    mime="application/pdf"
-                )
+            pdf_data = generate_pdf(store_num, oe_cycle, session_df)
+
+            st.download_button(
+                label="⬇️ Download PDF One Pager",
+                data=pdf_data,
+                file_name=f"IHOP_OE_{store_num}_{oe_cycle}_{datetime.now():%Y%m%d}.pdf",
+                mime="application/pdf",
+            )
 else:
     st.info("Enter store info and paste OE notes to start.")
-
