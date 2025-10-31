@@ -1,208 +1,153 @@
 # app.py
 import os
 import re
-from pathlib import Path
-from datetime import datetime
-from typing import List
-
 import pandas as pd
 import streamlit as st
+from fpdf import FPDF
+from datetime import datetime
 
-# --- App/UX setup ---
 st.set_page_config(page_title="IHOP OE One Pager", layout="wide")
-st.title("🥞 IHOP OE One Pager")
 
+LOGO_PATH = "ihop_logo.png"
 EXCEL_FILE = "OE_Opportunities_Classification.xlsx"
-EXCEL_PATH = Path.cwd() / EXCEL_FILE
-CLASS_CHOICES = ("FOH", "BOH", "BOTH")
 
-# --- Utility functions ---
 
-def _coerce_class(value: str) -> str:
-    """Keep classes within allowed set; else empty.
-    Why: Prevents typos from propagating into storage."""
-    if not isinstance(value, str):
-        return ""
-    v = value.strip().upper()
-    return v if v in CLASS_CHOICES else ""
+# --- Utility Functions ---
 
-@st.cache_data(show_spinner=False)
-def load_classifications(file_path: str) -> pd.DataFrame:
-    """Load Excel or return empty DF; ensure schema/dtypes."""
-    if os.path.exists(file_path):
-        df = pd.read_excel(file_path, dtype={"Opportunity": "string", "Classification": "string"})
-        if "Opportunity" not in df or "Classification" not in df:
-            df = pd.DataFrame(columns=["Opportunity", "Classification"])
+@st.cache_data
+def load_classifications(path: str) -> pd.DataFrame:
+    """Load or create the classification database."""
+    if os.path.exists(path):
+        df = pd.read_excel(path)
     else:
-        st.warning("⚠️ Classification file not found. A new file will be created on first save.")
         df = pd.DataFrame(columns=["Opportunity", "Classification"])
-
-    # Normalize
-    if not df.empty:
-        df["Opportunity"] = df["Opportunity"].astype("string").fillna("").str.strip()
-        df["Classification"] = df["Classification"].astype("string").map(_coerce_class)
-        # Drop blank rows just in case
-        df = df[df["Opportunity"].str.len() > 0].drop_duplicates(subset=["Opportunity"], keep="first")
-        df = df.reset_index(drop=True)
-    else:
-        df = pd.DataFrame(columns=["Opportunity", "Classification"]).astype({"Opportunity": "string", "Classification": "string"})
+    df["Opportunity"] = df["Opportunity"].astype(str).str.strip()
+    df["Classification"] = df["Classification"].astype(str).str.strip()
     return df
 
-def save_classifications(df: pd.DataFrame, file_path: str) -> None:
-    """Persist Excel and clear cache for immediate UI freshness."""
-    # Ensure columns exist in correct order
-    out = df[["Opportunity", "Classification"]].copy()
-    # Sanitize classification values
-    out["Classification"] = out["Classification"].map(_coerce_class).fillna("")
-    try:
-        out.to_excel(file_path, index=False)
-        st.success(f"✅ Classifications saved to {file_path}")
-    except Exception as e:
-        st.error(f"Failed to save Excel: {e}")
-        return
-    # Clear cache so subsequent loads reflect latest file
-    load_classifications.clear()
 
-def _strip_bullet_prefix(line: str) -> str:
-    """Remove common bullets/numbering. Why: Users paste raw notes."""
-    # bullets like -, *, •, 1., 1), (1), a), -, —
-    line = re.sub(r"^\s*[\-\*\u2022\u2013\u2014]\s+", "", line)  # bullets/dashes
-    line = re.sub(r"^\s*\(?[0-9a-zA-Z]{1,3}\)?[.)]\s+", "", line)  # 1. / 1) / (1) / a)
-    return line.strip()
+def save_classifications(df: pd.DataFrame, path: str):
+    """Persist updated classification database."""
+    df.to_excel(path, index=False)
+    st.toast("✅ Updated classifications saved.")
 
-def _looks_like_header(line: str) -> bool:
-    """Detect section headers."""
-    if line.endswith(":"):
-        return True
-    if re.match(r"^[A-Z0-9\s\-/]{3,}:?$", line) and line.isupper():
-        return True
-    return False
 
-def extract_opportunities(raw_text: str) -> List[str]:
-    """
-    Extract candidate opportunity lines from free text.
-    Rules:
-    - Skip headers/labels and very short lines.
-    - Strip bullets/numbers.
-    - Keep order; deduplicate case-insensitively.
-    """
-    if not raw_text:
-        return []
-
-    lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
-    cleaned: List[str] = []
-    seen_lower = set()
-
-    for ln in lines:
-        ln = _strip_bullet_prefix(ln)
-        if not ln or _looks_like_header(ln):
+def extract_opportunities(raw_text: str):
+    """Extract clean, meaningful opportunities."""
+    lines = [l.strip() for l in raw_text.split("\n") if l.strip()]
+    opportunities = []
+    for l in lines:
+        if len(l.split()) < 3 or l.endswith(":") or re.match(r"^[A-Z\s]+:$", l):
             continue
-        if len(ln.split()) < 3:
-            continue
-        # remove trailing punctuation-only
-        ln = re.sub(r"[;,:.\-\s]+$", "", ln).strip()
-        low = ln.lower()
-        if low and low not in seen_lower:
-            cleaned.append(ln)
-            seen_lower.add(low)
-    return cleaned
+        opportunities.append(l)
+    return opportunities
 
-def sync_classifications(class_db: pd.DataFrame, new_opps: List[str]) -> pd.DataFrame:
-    """Append missing opportunities to DB."""
-    if class_db.empty and not new_opps:
-        return class_db
-    existing = set(class_db["Opportunity"].str.lower())
-    missing = [o for o in new_opps if o.lower() not in existing]
+
+def generate_pdf(store_num: str, oe_cycle: str, df: pd.DataFrame):
+    """Generate a one-pager PDF report."""
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 16)
+
+    if os.path.exists(LOGO_PATH):
+        pdf.image(LOGO_PATH, x=10, y=8, w=30)
+
+    pdf.cell(200, 10, "IHOP OE One Pager", ln=True, align="C")
+    pdf.set_font("Arial", "", 12)
+    pdf.cell(200, 10, f"Store #{store_num} | OE Cycle: {oe_cycle}", ln=True, align="C")
+    pdf.ln(10)
+
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(140, 8, "Opportunity", border=1)
+    pdf.cell(40, 8, "Classification", border=1, ln=True)
+
+    pdf.set_font("Arial", "", 11)
+    for _, row in df.iterrows():
+        pdf.cell(140, 8, row["Opportunity"][:80], border=1)
+        pdf.cell(40, 8, row["Classification"], border=1, ln=True)
+
+    filename = f"IHOP_OE_{store_num}_{oe_cycle}_{datetime.now():%Y%m%d}.pdf"
+    pdf.output(filename)
+    return filename
+
+
+def sync_new_opportunities(existing_df, new_ops):
+    """Add missing opportunities to classification DB."""
+    existing = set(existing_df["Opportunity"].str.lower())
+    missing = [o for o in new_ops if o.lower() not in existing]
     if missing:
-        st.info(f"🆕 Added {len(missing)} new opportunities to the working table.")
-        new_df = pd.DataFrame({"Opportunity": pd.Series(missing, dtype="string"),
-                               "Classification": pd.Series([""] * len(missing), dtype="string")})
-        class_db = pd.concat([class_db, new_df], ignore_index=True)
-    return class_db
+        st.info(f"🆕 Found {len(missing)} new opportunities to classify.")
+        new_df = pd.DataFrame({"Opportunity": missing, "Classification": [""] * len(missing)})
+        updated_df = pd.concat([existing_df, new_df], ignore_index=True)
+    else:
+        updated_df = existing_df
+    return updated_df
 
-def class_stats(df: pd.DataFrame) -> dict:
-    counts = df["Classification"].map(_coerce_class).value_counts(dropna=False)
-    return {k: int(counts.get(k, 0)) for k in ["FOH", "BOH", "BOTH"]}
 
-# --- Data ---
-classification_db = load_classifications(str(EXCEL_PATH))
+# --- UI Layout ---
 
-# --- Sidebar: file actions ---
-with st.sidebar:
-    st.subheader("📁 File")
-    st.code(str(EXCEL_PATH), language="bash")
-    if st.button("🔄 Reload from disk", use_container_width=True):
-        load_classifications.clear()
-        classification_db = load_classifications(str(EXCEL_PATH))
-        st.toast("Reloaded from disk.")
+if os.path.exists(LOGO_PATH):
+    st.image(LOGO_PATH, width=120)
+st.title("🥞 IHOP OE One Pager")
 
-# --- Input ---
-st.markdown("### 🧾 Paste OE Notes or Opportunities")
-user_input = st.text_area("Paste text here:", height=260, placeholder="Paste your OE notes... (bullets, numbers, headers OK)")
+store_num = st.text_input("Store Number")
+oe_cycle = st.text_input("OE Cycle")
+user_input = st.text_area("Paste OE Notes or Opportunities Below:", height=250)
 
-opportunities = extract_opportunities(user_input) if user_input else []
-st.write(f"✅ Found **{len(opportunities)}** possible opportunities.")
-if opportunities:
-    with st.expander("Preview parsed lines", expanded=False):
-        for i, ln in enumerate(opportunities, 1):
-            st.write(f"{i}. {ln}")
+classification_db = load_classifications(EXCEL_FILE)
 
-# --- Merge & Edit ---
-working_df = classification_db.copy()
-if opportunities:
-    working_df = sync_classifications(working_df, opportunities)
+if user_input.strip():
+    opportunities = extract_opportunities(user_input)
+    st.write(f"✅ Found {len(opportunities)} opportunities.")
 
-# Editor with validation
-st.divider()
-st.markdown("### 🏷️ Classify Opportunities")
-if working_df.empty:
-    st.info("No opportunities to classify yet.")
+    if opportunities:
+        # Sync with master DB
+        classification_db = sync_new_opportunities(classification_db, opportunities)
+
+        # Display classification check UI
+        st.divider()
+        st.markdown("### 🏷️ Review & Classify Opportunities")
+
+        updated_rows = []
+        for opp in opportunities:
+            current_value = classification_db.loc[
+                classification_db["Opportunity"].str.lower() == opp.lower(), "Classification"
+            ].values
+            preselect = current_value[0] if len(current_value) > 0 and current_value[0] else "FOH"
+
+            selected = st.radio(
+                f"**{opp}**",
+                ["FOH", "BOH", "BOTH"],
+                horizontal=True,
+                index=["FOH", "BOH", "BOTH"].index(preselect) if preselect in ["FOH", "BOH", "BOTH"] else 0,
+                key=opp,
+            )
+            updated_rows.append((opp, selected))
+
+        st.warning("⚠️ Please review all classifications before generating the PDF.")
+        st.divider()
+
+        if st.button("💾 Save & Generate PDF One Pager"):
+            # Update database
+            for opp, selected in updated_rows:
+                mask = classification_db["Opportunity"].str.lower() == opp.lower()
+                if mask.any():
+                    classification_db.loc[mask, "Classification"] = selected
+                else:
+                    classification_db.loc[len(classification_db)] = [opp, selected]
+
+            save_classifications(classification_db, EXCEL_FILE)
+
+            # Generate PDF for current session only
+            session_df = pd.DataFrame(updated_rows, columns=["Opportunity", "Classification"])
+            pdf_path = generate_pdf(store_num, oe_cycle, session_df)
+            with open(pdf_path, "rb") as f:
+                st.download_button(
+                    label="⬇️ Download PDF One Pager",
+                    data=f,
+                    file_name=os.path.basename(pdf_path),
+                    mime="application/pdf"
+                )
 else:
-    col_left, col_right, col_mid = st.columns(3)
-    stats = class_stats(working_df)
-    col_left.metric("FOH", stats["FOH"])
-    col_mid.metric("BOH", stats["BOH"])
-    col_right.metric("BOTH", stats["BOTH"])
-
-    edited = st.data_editor(
-        working_df,
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Opportunity": st.column_config.TextColumn(required=True, help="Opportunity description"),
-            "Classification": st.column_config.SelectboxColumn(options=list(CLASS_CHOICES), required=False, help="Pick FOH / BOH / BOTH"),
-        },
-        key="editor_table",
-    )
-
-    # Save / Tools
-    c1, c2, c3 = st.columns([1, 1, 2])
-    if c1.button("💾 Save Updates", type="primary"):
-        save_classifications(edited, str(EXCEL_PATH))
-        # Refresh view
-        classification_db = load_classifications(str(EXCEL_PATH))
-        st.rerun()
-
-    if c2.button("🧹 Clear Unsaved Edits"):
-        st.session_state.pop("editor_table", None)
-        st.toast("Cleared unsaved edits.")
-        st.rerun()
-
-# --- Browse/Filter current DB ---
-st.divider()
-st.markdown("### 📊 Current Classification Database")
-
-if not classification_db.empty:
-    sel = st.multiselect("Filter by Classification", options=list(CLASS_CHOICES), default=[])
-    view_df = classification_db.copy()
-    if sel:
-        view_df = view_df[view_df["Classification"].isin(sel)]
-    st.dataframe(view_df, use_container_width=True)
-
-    # Download CSV (lightweight sharing/backups)
-    csv_bytes = view_df.to_csv(index=False).encode("utf-8")
-    st.download_button("⬇️ Download CSV", data=csv_bytes, file_name=f"OE_Opportunities_{datetime.now():%Y%m%d_%H%M%S}.csv", mime="text/csv")
-else:
-    st.info("No saved classifications yet. Add notes above and save.")
+    st.info("Enter store info and paste OE notes to start.")
 
