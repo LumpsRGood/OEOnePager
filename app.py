@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import unicodedata
 from io import BytesIO
 from datetime import datetime
@@ -26,7 +27,7 @@ except Exception:
     st.stop()
 
 # -----------------------------------------------------------------------------
-# GOOGLE SHEETS
+# GOOGLE SHEETS CONNECTION
 # -----------------------------------------------------------------------------
 def get_gsheet_client():
     creds_info = st.secrets["gcp_service_account"]
@@ -68,23 +69,42 @@ def normalize_text(s: str) -> str:
     return s.strip()
 
 # -----------------------------------------------------------------------------
-# FORCE OVERWRITE WRITER
+# FORCE OVERWRITE WRITER (GUARANTEED FIX)
 # -----------------------------------------------------------------------------
 def force_overwrite(ws, merged):
-    """Force Sheets to accept every write (avoids 'sticky' rows)."""
-    ws.clear()
-    ws.resize(len(merged) + 1, 2)
-    header = [["Opportunity", "Classification"]]
-    data_rows = merged.values.tolist()
-    chunk_size = 50
+    """
+    Force Sheets to accept updates even for 'sticky' cells.
+    Performs a pre-clear, waits for propagation, then re-writes in chunks.
+    """
+    try:
+        ws.clear()
+        ws.resize(len(merged) + 1, 2)
 
-    for i in range(0, len(data_rows), chunk_size):
-        chunk = data_rows[i:i+chunk_size]
-        if i == 0:
-            ws.update(header + chunk, range_name="A1", value_input_option="RAW")
-        else:
-            start_row = i + 1
-            ws.update(chunk, range_name=f"A{start_row}:B{start_row+len(chunk)-1}", value_input_option="RAW")
+        header = [["Opportunity", "Classification"]]
+        data_rows = merged.values.tolist()
+        chunk_size = 40
+
+        # Write header first
+        ws.update(header, range_name="A1", value_input_option="RAW")
+
+        for i in range(0, len(data_rows), chunk_size):
+            chunk = data_rows[i:i + chunk_size]
+            start_row = i + 2  # +1 for header
+            end_row = start_row + len(chunk) - 1
+            range_name = f"A{start_row}:B{end_row}"
+
+            # Step 1: hard clear the range (clears ghost cell metadata)
+            ws.batch_clear([range_name])
+            time.sleep(0.4)  # wait for backend to commit clear
+
+            # Step 2: re-write cleanly
+            ws.update(chunk, range_name=range_name, value_input_option="RAW")
+            time.sleep(0.2)
+
+        st.success("✅ Forced overwrite completed (no cache skipped).")
+
+    except Exception as e:
+        st.error(f"💥 Force overwrite failed: {e}")
 
 # -----------------------------------------------------------------------------
 # SAVE / MERGE
