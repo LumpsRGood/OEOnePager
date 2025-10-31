@@ -5,55 +5,69 @@ import streamlit as st
 from datetime import datetime
 from io import BytesIO
 from fpdf import FPDF
+import gspread
+from gspread_dataframe import set_with_dataframe, get_as_dataframe
+from oauth2client.service_account import ServiceAccountCredentials
 
-# ----------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
 # CONFIG
-# ----------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 st.set_page_config(page_title="IHOP OE One Pager", layout="wide")
-
 LOGO_PATH = "ihop_logo.png"
-EXCEL_FILE = "OE_Opportunities_Classification.xlsx"
+SHEET_NAME = "OE_Opportunities_Classification"
 
-# ----------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# GOOGLE SHEETS CONNECTION
+# -----------------------------------------------------------------------------
+def get_gsheet_client():
+    """Authenticate with Google Sheets using Streamlit secrets."""
+    creds_info = st.secrets["gcp_service_account"]
+    scope = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_info, scope)
+    client = gspread.authorize(creds)
+    return client
+
+
+def load_classifications():
+    """Load classifications from Google Sheet."""
+    try:
+        client = get_gsheet_client()
+        sheet = client.open(SHEET_NAME).sheet1
+        data = get_as_dataframe(sheet, evaluate_formulas=True, dtype=str)
+        if data.empty or "Opportunity" not in data.columns:
+            data = pd.DataFrame(columns=["Opportunity", "Classification"])
+        data = data.fillna("")
+        return data
+    except Exception as e:
+        st.error(f"Error loading data from Google Sheet: {e}")
+        return pd.DataFrame(columns=["Opportunity", "Classification"])
+
+
+def save_classifications(df: pd.DataFrame):
+    """Save classifications to Google Sheet."""
+    try:
+        client = get_gsheet_client()
+        sheet = client.open(SHEET_NAME).sheet1
+        sheet.clear()
+        set_with_dataframe(sheet, df)
+        st.toast("✅ Classifications saved to Google Sheet!")
+    except Exception as e:
+        st.error(f"Error saving to Google Sheet: {e}")
+
+
+# -----------------------------------------------------------------------------
 # UTILITIES
-# ----------------------------------------------------------------------
-@st.cache_data
-def load_classifications(file_path: str) -> pd.DataFrame:
-    """Load or create the Excel classification DB."""
-    if os.path.exists(file_path):
-        df = pd.read_excel(file_path)
-    else:
-        df = pd.DataFrame(columns=["Opportunity", "Classification"])
-    df["Opportunity"] = df["Opportunity"].astype(str).str.strip()
-    df["Classification"] = df["Classification"].astype(str).str.strip()
-    return df
-
-
-def save_classifications(df: pd.DataFrame, file_path: str):
-    """Save updates to the Excel classification DB."""
-    df.to_excel(file_path, index=False)
-    st.toast("✅ Classification database updated.")
-
-
+# -----------------------------------------------------------------------------
 def extract_opportunities(raw_text: str):
-    """
-    Extract opportunity lines, ignoring headers, short lines, and labels.
-    Cleans up bullets, dashes, and section titles like 'FOH:' or 'BOH:'.
-    """
+    """Extract valid opportunity lines while skipping headers and short lines."""
     lines = [line.strip() for line in raw_text.split("\n") if line.strip()]
     opportunities = []
-
     for line in lines:
-        # Clean up smart punctuation and bullets
-        line = (
-            line.replace("–", "-")
-            .replace("—", "-")
-            .replace("•", "")
-            .replace("●", "")
-            .strip()
-        )
-
-        # Exclude headers, section labels, and short lines
+        line = line.replace("–", "-").replace("—", "-").replace("•", "").replace("●", "")
         if line.endswith(":"):
             continue
         if re.match(r"^[A-Z\s]+:$", line):
@@ -62,13 +76,12 @@ def extract_opportunities(raw_text: str):
             continue
         if re.match(r"^(FOH|BOH|BOTH|NOTES|SUMMARY)\b[:\-]?", line, re.I):
             continue
-
         opportunities.append(line)
     return opportunities
 
 
 def sync_new_opportunities(existing_df: pd.DataFrame, new_ops: list) -> pd.DataFrame:
-    """Add new opportunities to DB if missing."""
+    """Add missing opportunities to the DB if not already present."""
     existing = set(existing_df["Opportunity"].str.lower())
     missing = [o for o in new_ops if o.lower() not in existing]
     if missing:
@@ -79,24 +92,20 @@ def sync_new_opportunities(existing_df: pd.DataFrame, new_ops: list) -> pd.DataF
 
 
 def sanitize_text(text: str) -> str:
-    """Replace unsupported characters with safe ASCII equivalents."""
+    """Clean non-ASCII and problematic characters for PDF output."""
     if not isinstance(text, str):
         return ""
-    text = text.replace("–", "-").replace("—", "-")
-    text = text.replace("“", '"').replace("”", '"')
-    text = text.replace("‘", "'").replace("’", "'")
-    text = re.sub(r"[•·●▪]", "-", text)
-    text = text.replace("\t", " ").replace("\r", " ").replace("\n", " ")
+    text = text.replace("\xa0", " ").replace("\t", " ").replace("\r", " ").replace("\n", " ")
+    text = re.sub(r"[^\x20-\x7E]", "", text)
     text = re.sub(r"\s{2,}", " ", text)
-    text = re.sub(r"[^\x00-\x7F]+", "", text)
     return text.strip()
 
 
-# ----------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # PDF GENERATION
-# ----------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 def generate_pdf(store_num: str, oe_cycle: str, df: pd.DataFrame) -> BytesIO:
-    """Generate PDF with FOH/BOH sections using built-in Helvetica font."""
+    """Generate clean FOH/BOH PDF."""
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -108,30 +117,12 @@ def generate_pdf(store_num: str, oe_cycle: str, df: pd.DataFrame) -> BytesIO:
     pdf.cell(200, 10, "IHOP OE One Pager", new_x="LMARGIN", new_y="NEXT", align="C")
 
     pdf.set_font("Helvetica", "", 12)
-    pdf.cell(
-        200,
-        10,
-        f"Store #{store_num} | OE Cycle: {oe_cycle}",
-        new_x="LMARGIN",
-        new_y="NEXT",
-        align="C",
-    )
+    pdf.cell(200, 10, f"Store #{store_num} | OE Cycle: {oe_cycle}", new_x="LMARGIN", new_y="NEXT", align="C")
     pdf.ln(10)
 
+    # Split sections
     foh_items = df[df["Classification"].isin(["FOH", "BOTH"])]
     boh_items = df[df["Classification"].isin(["BOH", "BOTH"])]
-
-    def safe_multicell(pdf, text):
-        """Multi-cell wrapper that prevents FPDF line width exceptions."""
-        text = sanitize_text(text)
-        text = re.sub(r"[\t\r\n]+", " ", text)
-        text = re.sub(r"\s{2,}", " ", text).strip()
-        if len(text) > 220:
-            text = text[:220] + "..."
-        try:
-            pdf.multi_cell(0, 6, f"- {text}")
-        except Exception:
-            pdf.multi_cell(0, 6, "- [Error displaying line]")
 
     def section(title, items):
         pdf.set_font("Helvetica", "B", 12)
@@ -141,8 +132,14 @@ def generate_pdf(store_num: str, oe_cycle: str, df: pd.DataFrame) -> BytesIO:
             pdf.multi_cell(0, 6, "— None —")
         else:
             for _, row in items.iterrows():
-                safe_multicell(pdf, row["Opportunity"])
-        pdf.ln(5)
+                text = sanitize_text(row["Opportunity"])
+                if len(text) > 220:
+                    text = text[:220] + "..."
+                try:
+                    pdf.multi_cell(0, 6, f"- {text}")
+                except Exception:
+                    pdf.multi_cell(0, 6, "- [Unable to render line]")
+        pdf.ln(4)
 
     section("FRONT OF HOUSE (FOH)", foh_items)
     section("BACK OF HOUSE (BOH)", boh_items)
@@ -157,9 +154,9 @@ def generate_pdf(store_num: str, oe_cycle: str, df: pd.DataFrame) -> BytesIO:
     return buffer
 
 
-# ----------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # STREAMLIT UI
-# ----------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 if os.path.exists(LOGO_PATH):
     st.image(LOGO_PATH, width=120)
 st.title("🥞 IHOP OE One Pager")
@@ -168,7 +165,7 @@ store_num = st.text_input("Store Number")
 oe_cycle = st.text_input("OE Cycle")
 user_input = st.text_area("Paste OE Notes or Opportunities Below:", height=250)
 
-classification_db = load_classifications(EXCEL_FILE)
+classification_db = load_classifications()
 
 if user_input.strip():
     opportunities = extract_opportunities(user_input)
@@ -206,7 +203,7 @@ if user_input.strip():
                     classification_db.loc[mask, "Classification"] = selected
                 else:
                     classification_db.loc[len(classification_db)] = [opp, selected]
-            save_classifications(classification_db, EXCEL_FILE)
+            save_classifications(classification_db)
 
             session_df = pd.DataFrame(updated_rows, columns=["Opportunity", "Classification"])
             pdf_data = generate_pdf(store_num, oe_cycle, session_df)
