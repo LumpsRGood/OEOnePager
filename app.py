@@ -7,7 +7,7 @@ from datetime import datetime
 from io import BytesIO
 from fpdf import FPDF
 import gspread
-from gspread_dataframe import set_with_dataframe, get_as_dataframe
+from gspread_dataframe import get_as_dataframe
 from oauth2client.service_account import ServiceAccountCredentials
 
 
@@ -15,7 +15,6 @@ from oauth2client.service_account import ServiceAccountCredentials
 # CONFIG
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="IHOP OE One Pager", layout="wide")
-
 LOGO_PATH = "ihop_logo.png"
 SHEET_NAME = "OE_Opportunities_Classification"
 
@@ -24,7 +23,6 @@ SHEET_NAME = "OE_Opportunities_Classification"
 # GOOGLE SHEETS CONNECTION
 # -----------------------------------------------------------------------------
 def get_gsheet_client():
-    """Authenticate with Google Sheets using Streamlit secrets."""
     creds_info = st.secrets["gcp_service_account"]
     scope = [
         "https://spreadsheets.google.com/feeds",
@@ -35,7 +33,7 @@ def get_gsheet_client():
 
 
 def load_classifications():
-    """Load classifications from Google Sheet."""
+    """Load classifications from Google Sheet safely."""
     try:
         client = get_gsheet_client()
         sheet = client.open(SHEET_NAME).sheet1
@@ -45,29 +43,23 @@ def load_classifications():
         data = data.fillna("")
         return data
     except Exception as e:
-        st.error(f"❌ Error loading data from Google Sheet: {e}")
+        st.error(f"❌ Error loading data: {e}")
         return pd.DataFrame(columns=["Opportunity", "Classification"])
 
 
 def save_classifications(updated_df: pd.DataFrame):
-    """
-    Merge updates with existing Google Sheet data (no clearing),
-    preserving other users' classifications.
-    """
+    """Safely merge and update classifications without overwriting."""
     try:
         client = get_gsheet_client()
         sheet = client.open(SHEET_NAME).sheet1
         existing_df = get_as_dataframe(sheet, evaluate_formulas=True, dtype=str).fillna("")
 
-        # Normalize columns
         if existing_df.empty or "Opportunity" not in existing_df.columns:
             existing_df = pd.DataFrame(columns=["Opportunity", "Classification"])
 
-        # Deduplicate by Opportunity (case-insensitive)
-        existing_df["Opportunity_lower"] = existing_df["Opportunity"].str.lower()
+        # Merge logic — preserve all, update duplicates
         updated_df["Opportunity_lower"] = updated_df["Opportunity"].str.lower()
-
-        # Merge (updated values take precedence)
+        existing_df["Opportunity_lower"] = existing_df["Opportunity"].str.lower()
         merged_df = pd.concat([existing_df, updated_df], ignore_index=True)
         merged_df = (
             merged_df.sort_values(by="Opportunity_lower")
@@ -75,47 +67,47 @@ def save_classifications(updated_df: pd.DataFrame):
             .drop(columns=["Opportunity_lower"])
         )
 
-        merged_df = merged_df.fillna("")
-        set_with_dataframe(sheet, merged_df)
-        st.toast("✅ Classifications merged & saved to Google Sheet!")
+        merged_df = merged_df.fillna("").astype(str)
+        rows = [merged_df.columns.values.tolist()] + merged_df.values.tolist()
+
+        # Update explicitly
+        sheet.clear()
+        sheet.update(rows)
+        st.success("✅ Classifications merged & updated successfully!")
     except Exception as e:
-        st.error(f"💥 Error saving to Google Sheet: {e}")
+        st.error(f"💥 Error updating Google Sheet: {e}")
 
 
 # -----------------------------------------------------------------------------
 # UTILITIES
 # -----------------------------------------------------------------------------
 def extract_opportunities(raw_text: str):
-    """Extract valid opportunity lines while skipping headers and short lines."""
+    """Extract valid opportunity lines."""
     lines = [line.strip() for line in raw_text.split("\n") if line.strip()]
     opportunities = []
     for line in lines:
         line = line.replace("–", "-").replace("—", "-").replace("•", "").replace("●", "")
-        if line.endswith(":"):
+        if line.endswith(":") or len(line.split()) < 3:
             continue
-        if re.match(r"^[A-Z\s]+:$", line):
-            continue
-        if len(line.split()) < 3:
-            continue
-        if re.match(r"^(FOH|BOH|BOTH|NOTES|SUMMARY)\b[:\-]?", line, re.I):
+        if re.match(r"^[A-Z\s]+:$", line) or re.match(r"^(FOH|BOH|BOTH|NOTES|SUMMARY)\b", line, re.I):
             continue
         opportunities.append(line)
     return opportunities
 
 
 def sync_new_opportunities(existing_df: pd.DataFrame, new_ops: list) -> pd.DataFrame:
-    """Add missing opportunities to the DB if not already present."""
+    """Add missing opportunities."""
     existing = set(existing_df["Opportunity"].str.lower())
     missing = [o for o in new_ops if o.lower() not in existing]
     if missing:
-        st.info(f"🆕 Added {len(missing)} new opportunities to the database.")
+        st.info(f"🆕 Added {len(missing)} new opportunities to database.")
         new_df = pd.DataFrame({"Opportunity": missing, "Classification": [""] * len(missing)})
         existing_df = pd.concat([existing_df, new_df], ignore_index=True)
     return existing_df
 
 
 def clean_for_pdf(s: str) -> str:
-    """Ensure text is ASCII-safe and FPDF-compatible."""
+    """Normalize text to be FPDF-safe."""
     if not isinstance(s, str):
         return ""
     s = unicodedata.normalize("NFKD", s)
@@ -127,10 +119,10 @@ def clean_for_pdf(s: str) -> str:
 
 
 # -----------------------------------------------------------------------------
-# PDF GENERATION
+# PDF GENERATION (Stable)
 # -----------------------------------------------------------------------------
 def generate_pdf(store_num: str, oe_cycle: str, df: pd.DataFrame) -> BytesIO:
-    """Generate clean FOH/BOH PDF."""
+    """Generate a PDF safely with fixed column widths."""
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -139,13 +131,12 @@ def generate_pdf(store_num: str, oe_cycle: str, df: pd.DataFrame) -> BytesIO:
     if os.path.exists(LOGO_PATH):
         pdf.image(LOGO_PATH, x=10, y=8, w=30)
     pdf.set_font("Helvetica", "B", 16)
-    pdf.cell(200, 10, "IHOP OE One Pager", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.cell(0, 10, "IHOP OE One Pager", new_x="LMARGIN", new_y="NEXT", align="C")
 
     pdf.set_font("Helvetica", "", 12)
-    pdf.cell(200, 10, f"Store #{store_num} | OE Cycle: {oe_cycle}", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.cell(0, 10, f"Store #{store_num} | OE Cycle: {oe_cycle}", new_x="LMARGIN", new_y="NEXT", align="C")
     pdf.ln(10)
 
-    # Split sections
     foh_items = df[df["Classification"].isin(["FOH", "BOTH"])]
     boh_items = df[df["Classification"].isin(["BOH", "BOTH"])]
 
@@ -154,7 +145,7 @@ def generate_pdf(store_num: str, oe_cycle: str, df: pd.DataFrame) -> BytesIO:
         pdf.cell(0, 8, title, new_x="LMARGIN", new_y="NEXT")
         pdf.set_font("Helvetica", "", 10)
         if items.empty:
-            pdf.multi_cell(0, 6, "— None —")
+            pdf.multi_cell(180, 6, "— None —")
         else:
             for _, row in items.iterrows():
                 text = clean_for_pdf(row["Opportunity"])
@@ -163,18 +154,17 @@ def generate_pdf(store_num: str, oe_cycle: str, df: pd.DataFrame) -> BytesIO:
                 if len(text) > 220:
                     text = text[:220] + "..."
                 try:
-                    pdf.multi_cell(0, 6, f"- {text}")
+                    pdf.multi_cell(180, 6, f"- {text}")
                 except Exception:
                     safe_text = re.sub(r"[^A-Za-z0-9 .,!?-]", "", text)
-                    pdf.multi_cell(0, 6, f"- {safe_text[:100]} [PDF sanitized]")
+                    pdf.multi_cell(180, 6, f"- {safe_text[:100]} [sanitized]")
         pdf.ln(4)
 
     section("FRONT OF HOUSE (FOH)", foh_items)
     section("BACK OF HOUSE (BOH)", boh_items)
 
-    # Footer
     pdf.set_font("Helvetica", "I", 9)
-    pdf.cell(0, 10, f"Generated on {datetime.now():%Y-%m-%d %H:%M}", align="R")
+    pdf.cell(0, 10, f"Generated {datetime.now():%Y-%m-%d %H:%M}", align="R")
 
     buffer = BytesIO()
     pdf.output(buffer)
@@ -197,7 +187,7 @@ classification_db = load_classifications()
 
 if user_input.strip():
     opportunities = extract_opportunities(user_input)
-    st.write(f"✅ Found **{len(opportunities)}** valid opportunities.")
+    st.write(f"✅ Found **{len(opportunities)}** opportunities.")
 
     if opportunities:
         classification_db = sync_new_opportunities(classification_db, opportunities)
@@ -221,7 +211,7 @@ if user_input.strip():
             )
             updated_rows.append((opp, selected))
 
-        st.warning("⚠️ Please review all classifications before generating the PDF.")
+        st.warning("⚠️ Review classifications before generating the PDF.")
         st.divider()
 
         if st.button("💾 Save & Generate PDF One Pager"):
