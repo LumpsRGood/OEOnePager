@@ -1,27 +1,37 @@
 import streamlit as st
 import pandas as pd
-import os
 from fpdf import FPDF
-import io
+from io import BytesIO
+import base64
+import datetime
 
-# --- 🔧 Full Reset on Startup (clears cache + session) ---
-st.cache_data.clear()
-st.cache_resource.clear()
-for key in list(st.session_state.keys()):
-    del st.session_state[key]
+# --- 💣 Absolute Clean Reset ---
+def reset_everything():
+    # Clear Streamlit's cache and all session data
+    st.cache_data.clear()
+    st.cache_resource.clear()
+    for key in list(st.session_state.keys()):
+        st.session_state.pop(key, None)
 
-st.set_page_config(page_title="IHOP OE One Pager", layout="wide")
+# Force reset on first load only
+if "initialized" not in st.session_state:
+    reset_everything()
+    st.session_state["initialized"] = True
 
-FILE_PATH = "OE_Opportunities_Classification.xlsx"
-LOGO_PATH = "ihop_logo.png"
+# Optional manual reset button (in sidebar)
+with st.sidebar:
+    if st.button("🔄 Reset App"):
+        reset_everything()
+        st.experimental_rerun()
 
-# Initialize or load data
-if os.path.exists(FILE_PATH):
-    df = pd.read_excel(FILE_PATH)
-else:
-    df = pd.DataFrame(columns=["Opportunity", "Classification"])
-
+st.set_page_config(
+    page_title="IHOP OE One Pager",
+    page_icon="🥞",
+    layout="centered",
+)
 st.title("🥞 IHOP OE One Pager")
+st.caption("Generate and verify OE opportunities for each restaurant.")
+
 
 st.markdown("### Paste text here *(one line per row)*")
 user_input = st.text_area(
