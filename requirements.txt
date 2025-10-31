@@ -1,6 +1,6 @@
 streamlit
 pandas
-openpyxl
-reportlab
-Pillow
 fpdf2
+gspread
+gspread-dataframe
+oauth2client
