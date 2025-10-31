@@ -6,92 +6,105 @@ import os
 # ---------- PAGE CONFIG ----------
 st.set_page_config(page_title="IHOP OE One Pager", layout="centered")
 st.title("🥞 IHOP OE One Pager")
-
-# ---------- LOGO ----------
-logo_path = "ihop_logo.png"  # make sure logo.png is in your project root
-if os.path.exists(logo_path):
-    st.image(logo_path, use_column_width=False, width=150)
-else:
-    st.warning("Logo not found — add a file named 'logo.png' in the app root.")
-
 st.markdown("---")
+
+# ---------- FILE PATH ----------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+excel_path = os.path.join(BASE_DIR, "OE_Opportunities_Classification.xlsx")
+
+# ---------- LOAD EXISTING DATA ----------
+if os.path.exists(excel_path):
+    df = pd.read_excel(excel_path)
+    st.success("Loaded existing OE_Opportunities_Classification.xlsx file.")
+else:
+    df = pd.DataFrame(columns=["Opportunity", "Classification"])
+    st.warning("No existing classification file found — a new one will be created after saving.")
 
 # ---------- TEXT INPUT ----------
 text_input = st.text_area(
     "Paste text here (one line per row)",
     height=150,
-    placeholder="Paste text here (one line per row). Each opportunity should be on its own line."
+    placeholder="Paste text here. Each opportunity should be on its own line."
 )
 
-# Create DataFrame only if there’s input
 if text_input:
-    # ignore lines that are headers or section titles
-    lines = [line.strip() for line in text_input.split("\n") if line.strip() and ":" not in line]
-    df = pd.DataFrame(lines, columns=["Opportunity"])
-else:
-    df = pd.DataFrame(columns=["Opportunity"])
+    new_lines = [line.strip() for line in text_input.split("\n") if line.strip() and ":" not in line]
+    for line in new_lines:
+        if line not in df["Opportunity"].values:
+            df.loc[len(df)] = [line, ""]
 
 # ---------- CLASSIFICATION ----------
 if not df.empty:
     st.subheader("Please Verify Each Opportunity (FOH / BOH / BOTH)")
 
-    classifications = []
     for i, row in df.iterrows():
         col1, col2 = st.columns([3, 1])
         with col1:
             st.text(row["Opportunity"])
         with col2:
-            choice = st.radio(
-                "Select", ["FOH", "BOH", "BOTH"],
+            df.at[i, "Classification"] = st.radio(
+                "Select",
+                ["FOH", "BOH", "BOTH"],
                 horizontal=True,
-                key=f"class_{i}"
+                key=f"class_{i}",
+                index=["FOH", "BOH", "BOTH"].index(row["Classification"])
+                if row["Classification"] in ["FOH", "BOH", "BOTH"] else 0
             )
-        classifications.append(choice)
-    df["Classification"] = classifications
+
+    if st.button("💾 Update Database"):
+        os.makedirs(os.path.dirname(excel_path), exist_ok=True)
+        df.to_excel(excel_path, index=False)
+        st.success("Database updated and saved successfully to OE_Opportunities_Classification.xlsx.")
 
     st.markdown("---")
 
-    # ---------- GROUPING ----------
+    # ---------- GROUP AND PREVIEW ----------
     grouped = df.groupby("Classification")["Opportunity"].apply(list).to_dict()
 
-    st.success("All items verified! Ready to generate your one-pager PDF.")
+    st.subheader("✅ Verified Opportunities Summary")
+    for section in ["FOH", "BOH", "BOTH"]:
+        if section in grouped:
+            st.write(f"**{section} ({len(grouped[section])})**")
+            for item in grouped[section]:
+                st.markdown(f"- {item}")
+            st.markdown("")
 
     # ---------- PDF GENERATION ----------
-    st.subheader("📄 Generate PDF")
-
+    st.subheader("📄 Generate One Pager PDF")
     store_number = st.text_input("Enter Store Number:")
-    oe_cycle = st.text_input("Enter OE Cycle (e.g. 'Cycle 2, 2025')")
+    oe_cycle = st.text_input("Enter OE Cycle (e.g., 'Cycle 2, 2025')")
 
     if st.button("Generate One Pager PDF"):
         if not store_number or not oe_cycle:
-            st.error("Please enter both Store Number and OE Cycle.")
+            st.error("Please enter both Store Number and OE Cycle before generating the PDF.")
         else:
             pdf = FPDF()
             pdf.add_page()
             pdf.set_auto_page_break(auto=True, margin=15)
 
-            # Header / Logo
-            if os.path.exists(logo_path):
-                pdf.image(logo_path, x=80, w=50)  # centered
-            pdf.ln(30)
+            def safe_text(s):
+                """Handle Unicode safely for FPDF."""
+                return s.encode("latin-1", "replace").decode("latin-1")
+
             pdf.set_font("Helvetica", "B", 16)
-            pdf.cell(0, 10, f"IHOP OE One Pager", ln=True, align="C")
+            pdf.cell(0, 10, safe_text("IHOP OE One Pager"), ln=True, align="C")
+
             pdf.set_font("Helvetica", "", 12)
-            pdf.cell(0, 10, f"Store: {store_number} | {oe_cycle}", ln=True, align="C")
+            pdf.cell(0, 10, safe_text(f"Store: {store_number} | {oe_cycle}"), ln=True, align="C")
             pdf.ln(10)
 
-            # Add grouped items
             for section in ["FOH", "BOH", "BOTH"]:
-                if section in grouped:
+                if section in grouped and len(grouped[section]) > 0:
                     pdf.set_font("Helvetica", "B", 14)
-                    pdf.cell(0, 10, section, ln=True)
+                    pdf.cell(0, 10, safe_text(section), ln=True)
                     pdf.set_font("Helvetica", "", 12)
                     for item in grouped[section]:
-                        pdf.multi_cell(0, 8, f"• {item}")
+                        pdf.multi_cell(0, 8, safe_text(f"• {item}"))
                     pdf.ln(5)
 
-            output_path = "IHOP_OE_OnePager.pdf"
+            output_path = os.path.join(BASE_DIR, f"IHOP_OE_OnePager_{store_number}.pdf")
             pdf.output(output_path)
+
             with open(output_path, "rb") as f:
                 st.download_button(
                     label="⬇️ Download One Pager PDF",
@@ -99,5 +112,6 @@ if not df.empty:
                     file_name=f"IHOP_OE_{store_number}.pdf",
                     mime="application/pdf"
                 )
+
 else:
     st.info("Paste opportunities above to begin classification.")
