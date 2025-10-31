@@ -11,9 +11,9 @@ from oauth2client.service_account import ServiceAccountCredentials
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # CONFIG
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 st.set_page_config(page_title="IHOP OE One Pager", layout="wide")
 
 LOGO_PATH = "ihop_logo.png"
@@ -26,9 +26,9 @@ except Exception:
     st.error("❌ Missing [gsheets] in secrets.toml (spreadsheet_id, worksheet_title)")
     st.stop()
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # GOOGLE SHEETS CONNECTION
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 def get_gsheet_client():
     creds_info = st.secrets["gcp_service_account"]
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -54,9 +54,9 @@ def df_from_ws(ws):
     df = df.fillna("").astype(str)
     return df[df["Opportunity"].str.strip() != ""].reset_index(drop=True)
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # NORMALIZATION
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 def normalize_text(s: str) -> str:
     """Normalize invisible characters, dashes, and spaces."""
     if not isinstance(s, str):
@@ -68,95 +68,51 @@ def normalize_text(s: str) -> str:
     s = re.sub(r"[^\x20-\x7E]", "", s)  # strip non-ASCII
     return s.strip()
 
-# -----------------------------------------------------------------------------
-# FORCE OVERWRITE WRITER (GUARANTEED FIX)
-# -----------------------------------------------------------------------------
-def force_overwrite(ws, merged):
-    """
-    Force Sheets to accept updates even for 'sticky' cells.
-    Performs a pre-clear, waits for propagation, then re-writes in chunks.
-    """
-    try:
-        ws.clear()
-        ws.resize(len(merged) + 1, 2)
-
-        header = [["Opportunity", "Classification"]]
-        data_rows = merged.values.tolist()
-        chunk_size = 40
-
-        # Write header first
-        ws.update(header, range_name="A1", value_input_option="RAW")
-
-        for i in range(0, len(data_rows), chunk_size):
-            chunk = data_rows[i:i + chunk_size]
-            start_row = i + 2  # +1 for header
-            end_row = start_row + len(chunk) - 1
-            range_name = f"A{start_row}:B{end_row}"
-
-            # Step 1: hard clear the range (clears ghost cell metadata)
-            ws.batch_clear([range_name])
-            time.sleep(0.4)  # wait for backend to commit clear
-
-            # Step 2: re-write cleanly
-            ws.update(chunk, range_name=range_name, value_input_option="RAW")
-            time.sleep(0.2)
-
-        st.success("✅ Forced overwrite completed (no cache skipped).")
-
-    except Exception as e:
-        st.error(f"💥 Force overwrite failed: {e}")
-
-# -----------------------------------------------------------------------------
-# SAVE / MERGE
-# -----------------------------------------------------------------------------
-import hashlib
-
-def hash_key(text: str) -> str:
-    """Stable hash for normalized text."""
-    norm = normalize_text(text).strip().lower().encode("utf-8")
-    return hashlib.md5(norm).hexdigest()
-
-def save_classifications_merge(updates_df):
-    """Merge using stable hash keys so updates always target correct rows."""
+# ---------------------------------------------------------------------------
+# SAVE CLASSIFICATIONS (FULL REPLACE METHOD)
+# ---------------------------------------------------------------------------
+def save_classifications_replace_all(updates_df):
+    """Completely replaces the sheet body on each save — safest method."""
     try:
         ws = open_ws()
+
+        # Normalize both sides
+        updates_df["Opportunity"] = updates_df["Opportunity"].apply(normalize_text)
+        updates_df["Classification"] = updates_df["Classification"].astype(str).str.strip()
+
         existing_df = df_from_ws(ws)
+        existing_df["Opportunity"] = existing_df["Opportunity"].apply(normalize_text)
+        existing_df["Classification"] = existing_df["Classification"].astype(str).str.strip()
 
-        # Normalize and hash both datasets
-        for df in (existing_df, updates_df):
-            df["Opportunity"] = df["Opportunity"].apply(normalize_text)
-            df["Classification"] = df["Classification"].astype(str).str.strip()
-            df["__key"] = df["Opportunity"].apply(hash_key)
-
-        # Merge by hash key (stable even if text changes subtly in Sheets)
+        # Combine + deduplicate
         merged = (
             pd.concat([existing_df, updates_df], ignore_index=True)
-            .sort_values("__key")
-            .drop_duplicates("__key", keep="last")
-            .drop(columns="__key")[["Opportunity", "Classification"]]
-            .fillna("")
-            .astype(str)
+            .drop_duplicates(subset=["Opportunity"], keep="last")
+            .reset_index(drop=True)
         )
 
-        # Safe overwrite (same function you already have)
-        force_overwrite(ws, merged)
+        # Rewrite full sheet (header + data)
+        all_rows = [["Opportunity", "Classification"]] + merged.values.tolist()
+        ws.batch_clear(["A1:B1000"])
+        time.sleep(0.5)
+        ws.update(all_rows, range_name="A1", value_input_option="RAW")
 
-        st.success(f"✅ {len(merged)} total rows written to Google Sheet.")
+        st.success(f"✅ Rewrote {len(merged)} rows to Google Sheet (full replace).")
 
-        # Debug
         bdp_rows = merged[merged["Opportunity"].str.contains("BDP", case=False)]
         if not bdp_rows.empty:
-            st.write("🧩 Debug – BDP entries written with hash match:")
+            st.write("🧩 Debug – BDP entries written:")
             st.dataframe(bdp_rows)
 
         return merged
 
     except Exception as e:
-        st.error(f"💥 Save error: {e}")
+        st.error(f"💥 Sheet replace failed: {e}")
         return None
-# -----------------------------------------------------------------------------
-# UTILITIES
-# -----------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# EXTRACT OPPORTUNITIES
+# ---------------------------------------------------------------------------
 def extract_opportunities(raw_text):
     lines = [l.strip() for l in raw_text.split("\n") if l.strip()]
     opps = []
@@ -172,9 +128,9 @@ def extract_opportunities(raw_text):
         opps.append(line)
     return opps
 
-# -----------------------------------------------------------------------------
-# PDF
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# PDF GENERATION
+# ---------------------------------------------------------------------------
 def generate_pdf(store_num, oe_cycle, df):
     pdf = FPDF()
     pdf.add_page()
@@ -195,10 +151,7 @@ def generate_pdf(store_num, oe_cycle, df):
         t = normalize_text(t) or "[Empty]"
         pdf.set_font("Helvetica", "", 10)
         pdf.cell(bullet_w, 6, "- ", new_x=XPos.RIGHT, new_y=YPos.TOP)
-        try:
-            pdf.multi_cell(text_w, 6, t)
-        except Exception:
-            pdf.multi_cell(text_w, 6, t[:150] + " [sanitized]")
+        pdf.multi_cell(text_w, 6, t)
 
     def section(title, subset):
         pdf.set_font("Helvetica", "B", 12)
@@ -226,9 +179,9 @@ def generate_pdf(store_num, oe_cycle, df):
     out.seek(0)
     return out
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # STREAMLIT UI
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 if os.path.exists(LOGO_PATH):
     st.image(LOGO_PATH, width=120)
 
@@ -280,7 +233,7 @@ if user_input.strip():
 
         if st.button("💾 Save & Generate PDF One Pager"):
             updates_df = pd.DataFrame(updated_rows, columns=["Opportunity", "Classification"])
-            merged = save_classifications_merge(updates_df)
+            merged = save_classifications_replace_all(updates_df)
             if merged is not None:
                 pdf_data = generate_pdf(store_num, oe_cycle, updates_df)
                 st.download_button(
