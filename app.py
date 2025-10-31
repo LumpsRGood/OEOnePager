@@ -109,23 +109,26 @@ def force_overwrite(ws, merged):
 # -----------------------------------------------------------------------------
 # SAVE / MERGE
 # -----------------------------------------------------------------------------
+import hashlib
+
+def hash_key(text: str) -> str:
+    """Stable hash for normalized text."""
+    norm = normalize_text(text).strip().lower().encode("utf-8")
+    return hashlib.md5(norm).hexdigest()
+
 def save_classifications_merge(updates_df):
-    """Merge that tolerates trailing punctuation/plurals but keeps original text."""
+    """Merge using stable hash keys so updates always target correct rows."""
     try:
         ws = open_ws()
         existing_df = df_from_ws(ws)
 
-        def merge_key(s):
-            s = normalize_text(s)
-            s = re.sub(r"[^\w\s]", "", s)      # drop punctuation
-            s = re.sub(r"\bs\b", "", s)        # singularize simple plurals
-            return s.strip().lower()
-
+        # Normalize and hash both datasets
         for df in (existing_df, updates_df):
             df["Opportunity"] = df["Opportunity"].apply(normalize_text)
             df["Classification"] = df["Classification"].astype(str).str.strip()
-            df["__key"] = df["Opportunity"].apply(merge_key)
+            df["__key"] = df["Opportunity"].apply(hash_key)
 
+        # Merge by hash key (stable even if text changes subtly in Sheets)
         merged = (
             pd.concat([existing_df, updates_df], ignore_index=True)
             .sort_values("__key")
@@ -135,19 +138,15 @@ def save_classifications_merge(updates_df):
             .astype(str)
         )
 
-        merged["Opportunity"] = (
-            merged["Opportunity"]
-            .apply(lambda x: x.encode("ascii", "ignore").decode("ascii"))
-            .apply(normalize_text)
-        )
-
+        # Safe overwrite (same function you already have)
         force_overwrite(ws, merged)
 
         st.success(f"✅ {len(merged)} total rows written to Google Sheet.")
 
+        # Debug
         bdp_rows = merged[merged["Opportunity"].str.contains("BDP", case=False)]
         if not bdp_rows.empty:
-            st.write("🧩 Debug – BDP entries written after soft merge:")
+            st.write("🧩 Debug – BDP entries written with hash match:")
             st.dataframe(bdp_rows)
 
         return merged
